@@ -520,9 +520,19 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
     if req_missing:
         return "Ye fields bharna zaroori hai: " + ", ".join(req_missing)
 
-    # Apne-aap hisaab (Toner Balance, No of Paper, Balance Paper Qty ...)
+    # Khaali form ki jaanch: pehle se bhari tareekh/samay, auto-hisaab wale fields
+    # aur bina tick ke checkbox ko "bhara hua" nahi maana jaata
     types = {c["column_name"]: c["data_type"] for c in fields}
-    for r in calc_rules(table, labels):
+    rules = calc_rules(table, labels)
+    auto_cols = {r["t_col"] for r in rules}
+    filled = [n for n, v in row.items()
+              if n not in auto_cols and v is not False
+              and not types.get(n, "").startswith(("date", "timestamp", "time"))]
+    if not filled and not any_photo:
+        return "Form is Empty ?"
+
+    # Apne-aap hisaab (Toner Balance, No of Paper, Balance Paper Qty ...)
+    for r in rules:
         row.pop(r["t_col"], None)
         res = run_rule(r, row, types)
         if res is None:
@@ -530,12 +540,6 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
         if r.get("no_negative") and res < 0:
             return f"{r['uses'][1]}, {r['uses'][0]} se zyada nahi ho sakta."
         row[r["t_col"]] = res
-    text_filled = any(isinstance(v, str) for v in row.values())
-    if not row and not any_photo:
-        return "Form is Empty ?"
-    if any(c["data_type"] in ("text", "character varying") for c in fields) \
-            and not text_filled and not any_photo:
-        return "Form is Empty ?"
 
     # Duplicate jaanch: bilkul wahi entry 2 minute ke andar dobara save na ho
     photo_sig = sorted((col, getattr(u, "name", ""), getattr(u, "size", 0))
