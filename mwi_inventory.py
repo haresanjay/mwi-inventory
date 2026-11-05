@@ -435,7 +435,7 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
 
     done = st.session_state.pop(f"{table}_done", None)
     if done is not None:
-        st.success(f"✅ {TABLES[table]} mein entry save ho gayi!")
+        st.success("Entry Saved")
         if done:
             for colx, (t, u) in zip(st.columns(len(done)), done):
                 colx.image(u, caption=t, width=200)
