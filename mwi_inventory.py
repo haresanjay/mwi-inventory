@@ -13,6 +13,7 @@ Chalane ke liye:  run_app.bat  par double-click   (ya:  streamlit run mwi_invent
 
 import io
 import json
+import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -65,6 +66,58 @@ PHOTOS = {
     },
 }
 BUCKET = "parts_images"
+
+# Form mein fields ka kram (order) aur naam.
+# (Dikhne wala naam, database column ke sambhavit naam, naya column ka naam, SQL type)
+F = lambda label, aliases, sql_name, sql_type: {
+    "label": label, "aliases": aliases, "sql": sql_name, "type": sql_type}
+FIELD_ORDER = {
+    "Machine_Parts": {
+        "first": [
+            F("Machine No", ["machine_no", "machine_number", "mc_no", "machine"], "Machine_No", "text"),
+            F("Parts Name", ["parts_name", "part_name", "item_name", "name", "parts"], "Parts_Name", "text"),
+            F("Qty", ["qty", "quantity"], "Qty", "integer"),
+        ],
+    },
+    "Machine_Counter": {
+        "first": [
+            F("Machine No", ["machine_no", "machine_number", "mc_no", "machine"], "Machine_No", "text"),
+        ],
+        "last": [
+            F("Reason", ["reason", "remark", "remarks"], "Reason", "text"),
+        ],
+    },
+    "PDF_DETAIL": {
+        "first": [
+            F("District Name", ["district_name", "district", "dist_name", "dist", "zila"],
+              "District_Name", "text"),
+            F("Ac No", ["ac_no", "ac_number", "acno", "ac", "assembly_no", "assembly_constituency_no",
+                        "account_no"], "Ac_No", "text"),
+            F("Page Qty", ["page_qty", "pages_qty", "page_quantity", "no_of_pages", "no_of_page",
+                           "pages", "page", "total_pages", "page_count"], "Page_Qty", "integer"),
+        ],
+    },
+    "Paper_Table": {
+        "first": [
+            F("Paper Received Date", ["paper_received_date", "paper_receive_date", "received_date",
+                                      "receive_date", "paper_date", "date"], "Paper_Received_Date", "date"),
+            F("Invoice No", ["invoice_no", "invoice_number", "invoice", "bill_no"], "Invoice_No", "text"),
+            F("Party Name", ["party_name", "party", "supplier_name", "supplier"], "Party_Name", "text"),
+            F("GSM", ["gsm"], "GSM", "integer"),
+            F("Paper Company", ["paper_company", "company", "company_name", "brand"], "Paper_Company", "text"),
+            F("Qty Rim", ["qty_rim", "qty_rims", "rim_qty", "rim", "rims", "qty_ream", "ream", "reams"],
+              "Qty_Rim", "numeric"),
+            F("No of Paper", ["no_of_paper", "no_of_papers", "number_of_paper", "no_of_sheets",
+                              "total_paper", "paper_qty", "sheets"], "No_of_Paper", "integer"),
+            F("Consumption Paper", ["consumption_paper", "paper_consumption", "consumption",
+                                    "consumed_paper", "used_paper"], "Consumption_Paper", "integer"),
+        ],
+    },
+}
+
+
+def norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
 MAX_IMG_SIDE = 1600      # photo isse badi ho to chhoti kar di jaati hai (jagah bachane ke liye)
 JPEG_QUALITY = 82
 
@@ -185,18 +238,18 @@ def pretty(name: str) -> str:
     return name.replace("_", " ").strip().title()
 
 
-def input_for(col: dict, key: str):
+def input_for(col: dict, key: str, label: str | None = None):
     """Column ke data type ke hisaab se sahi input box banata hai."""
     name, dt = col["column_name"], col["data_type"]
     req = (not col["is_nullable"]) and (not col["has_default"])
-    label = pretty(name) + (" *" if req else "")
+    label = (label or pretty(name)) + (" *" if req else "")
 
     if dt in INT_TYPES:
         return st.number_input(label, value=None, step=1, key=key)
     if dt in NUM_TYPES:
         return st.number_input(label, value=None, step=1.0, format="%.2f", key=key)
     if dt == "boolean":
-        return st.checkbox(pretty(name), key=key)
+        return st.checkbox(label, key=key)
     if dt == "date":
         return st.date_input(label, value=now_ist().date(), format="DD/MM/YYYY", key=key)
     if dt.startswith("timestamp"):
@@ -243,6 +296,35 @@ def find_col(cols: list[dict], lower_name: str) -> str | None:
         if c["column_name"].lower() == lower_name:
             return c["column_name"]
     return None
+
+
+def arrange_fields(table: str, fields: list[dict]):
+    """Fields ko FIELD_ORDER ke kram mein lagata hai.
+    Lautata hai: [(column, label)], {column: label}, [missing specs]"""
+    conf = FIELD_ORDER.get(table, {})
+    by_norm = {norm(c["column_name"]): c["column_name"] for c in fields}
+    used, labels, missing = set(), {}, []
+
+    def match(spec):
+        for a in [spec["sql"]] + spec["aliases"]:
+            col = by_norm.get(norm(a))
+            if col and col not in used:
+                used.add(col)
+                labels[col] = spec["label"]
+                return col
+        missing.append(spec)
+        return None
+
+    first = [c for c in (match(sp) for sp in conf.get("first", [])) if c]
+    last = [c for c in (match(sp) for sp in conf.get("last", [])) if c]
+    middle = [c["column_name"] for c in fields if c["column_name"] not in used]
+    order = first + middle + last
+    return [(c, labels.get(c, pretty(c))) for c in order], labels, missing
+
+
+def missing_sql(table: str, missing: list[dict]) -> str:
+    return "\n".join(f'alter table public."{table}" add column if not exists '
+                     f'"{m["sql"]}" {m["type"]};' for m in missing)
 
 
 def photo_fields(table: str, cols: list[dict]) -> list[dict]:
@@ -299,11 +381,20 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
             for colx, (t, u) in zip(st.columns(len(done)), done):
                 colx.image(u, caption=t, width=200)
 
+    ordered, labels, missing = arrange_fields(table, fields)
+    if missing:
+        names = ", ".join(m["label"] for m in missing)
+        with st.expander(f"⚠️ Ye field table mein nahi mile: {names}"):
+            st.write("Supabase ke SQL Editor mein ye chalayein, phir sidebar mein "
+                     "**Columns Refresh** dabayein:")
+            st.code(missing_sql(table, missing), language="sql")
+
+    by_name = {c["column_name"]: c for c in fields}
     values = {}
     grid = st.columns(2)
-    for i, c in enumerate(fields):
+    for i, (name, label) in enumerate(ordered):
         with grid[i % 2]:
-            values[c["column_name"]] = input_for(c, f"{k}_{c['column_name']}")
+            values[name] = input_for(by_name[name], f"{k}_{name}", label)
 
     uploads = {}                                   # column -> photo
     if pics:
@@ -319,20 +410,20 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         return
 
     # check + convert
-    row, missing = {}, []
+    row, req_missing = {}, []
     for c in fields:
         name = c["column_name"]
         try:
             v = to_db_value(c, values.get(name))
         except (ValueError, json.JSONDecodeError):
-            st.error(f"'{pretty(name)}' ki value sahi nahi hai.")
+            st.error(f"'{labels.get(name, pretty(name))}' ki value sahi nahi hai.")
             return
         if v is None and not c["is_nullable"] and not c["has_default"]:
-            missing.append(pretty(name))
+            req_missing.append(labels.get(name, pretty(name)))
         if v is not None:
             row[name] = v
-    if missing:
-        st.error("Ye fields bharna zaroori hai: " + ", ".join(missing))
+    if req_missing:
+        st.error("Ye fields bharna zaroori hai: " + ", ".join(req_missing))
         return
     text_filled = any(isinstance(v, str) for v in row.values())
     if not row and not any_photo:
@@ -382,13 +473,25 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     pics = [f for f in photo_fields(table, cols) if f["col"] in df.columns]
     pic_cols = [f["col"] for f in pics]
 
+    # columns ka kram: id -> form wale fields -> photos -> created_at
+    auto = [c for c in cols if c["is_auto"]]
+    inputs = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols]
+    ordered, labels, _ = arrange_fields(table, inputs)
+    order = ([c["column_name"] for c in auto if not c["data_type"].startswith("timestamp")]
+             + [n for n, _ in ordered] + pic_cols
+             + [c["column_name"] for c in auto if c["data_type"].startswith("timestamp")])
+    order = [c for c in order if c in df.columns] + [c for c in df.columns if c not in order]
+    df = df[order]
+    all_labels = {n: lbl for n, lbl in ordered}
+
     view = df.copy()
-    cfg = {}
+    cfg = {n: st.column_config.Column(lbl) for n, lbl in all_labels.items()}
     for f in pics:
         view[f["col"]] = view[f["col"]].map(lambda v: image_src(db, v))
         cfg[f["col"]] = st.column_config.ImageColumn(f["label"], width="small")
     st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg)
-    st.download_button("⬇️ Excel (CSV) download", df.to_csv(index=False).encode("utf-8-sig"),
+    csv = df.rename(columns={**all_labels, **{f["col"]: f["label"] for f in pics}})
+    st.download_button("⬇️ Excel (CSV) download", csv.to_csv(index=False).encode("utf-8-sig"),
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
 
     if not pics:
