@@ -573,7 +573,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     except RuntimeError:
         rows = db.select(table, {"select": "*", "limit": limit})
     if not rows:
-        st.info("Abhi koi entry nahi hai.")
+        st.info("Empty Entry ?")
         return
     df = pd.DataFrame(rows)
     for c in cols:                         # UTC -> India ka samay
