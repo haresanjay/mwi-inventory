@@ -99,6 +99,17 @@ FIELD_ORDER = {
                            "pages", "page", "total_pages", "page_count"], "Page_Qty", "integer"),
         ],
     },
+    "Toner": {
+        "first": [
+            F("Invoice No", ["invoice_no", "invoice_number", "invoice", "bill_no"], "Invoice_No", "text"),
+            F("Toner Company", ["toner_company", "company", "company_name", "brand", "toner_brand"],
+              "Toner_Company", "text"),
+            F("Toner Qty", ["toner_qty", "qty", "quantity", "toner_quantity"], "Toner_Qty", "integer"),
+            F("Toner Used", ["toner_used", "used", "used_qty", "toner_use"], "Toner_Used", "integer"),
+            F("Toner Balance Qty", ["toner_balance_qty", "toner_balance", "balance_qty", "balance"],
+              "Toner_Balance_Qty", "integer"),
+        ],
+    },
     "Paper_Table": {
         "first": [
             F("Paper Received Date", ["paper_received_date", "paper_receive_date", "received_date",
@@ -450,6 +461,15 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
             row[name] = v
     if req_missing:
         return "Ye fields bharna zaroori hai: " + ", ".join(req_missing)
+
+    # Toner: Balance khaali chhoda ho to apne-aap  Toner Qty - Toner Used
+    if table == "Toner":
+        by_label = {lbl: col for col, lbl in labels.items()}
+        q, u, b = (by_label.get(x) for x in ("Toner Qty", "Toner Used", "Toner Balance Qty"))
+        if q and u and b and b not in row and q in row:
+            row[b] = row[q] - row.get(u, 0)
+            if row[b] < 0:
+                return "Toner Used, Toner Qty se zyada nahi ho sakta."
     text_filled = any(isinstance(v, str) for v in row.values())
     if not row and not any_photo:
         return "Form khaali hai. Pehle details bharein, phir Save dabayein."
