@@ -11,9 +11,11 @@ Images : Supabase Storage (cloud) ke bucket "parts_images" mein
 Chalane ke liye:  run_app.bat  par double-click   (ya:  streamlit run mwi_inventory.py)
 """
 
+import hashlib
 import io
 import json
 import re
+import time as _time
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -402,52 +404,79 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         for colx, f in zip(st.columns(len(pics)), pics):
             with colx:
                 uploads[f["col"]] = photo_picker(f["label"], f"{k}_{f['col']}")
-    any_photo = any(u is not None for u in uploads.values())
 
-    submitted = st.button("💾 Save", type="primary", use_container_width=True,
-                          key=f"{k}_save")
-    if not submitted:
+    # ---- Save button: dabate hi band (disabled) ho jata hai, double save nahi hoga
+    lock_key, err_key = f"{table}_saving", f"{table}_err"
+    saving = st.session_state.get(lock_key, False)
+
+    def _start_save():
+        st.session_state[lock_key] = True
+
+    st.button("⏳ Save ho raha hai... Pls Wait" if saving else "💾 Save",
+              type="primary", use_container_width=True, disabled=saving,
+              on_click=_start_save, key=f"{k}_save")
+    err = st.session_state.pop(err_key, None)
+    if err:
+        st.error(err)
+    if not saving:
         return
 
-    # check + convert
+    try:
+        result = save_entry(db, table, fields, labels, pics, values, uploads)
+    finally:
+        st.session_state[lock_key] = False
+
+    if isinstance(result, str):                    # galti ka sandesh
+        st.session_state[err_key] = result
+    else:
+        st.session_state[f"{table}_done"] = result
+        st.session_state[ver_key] = ver + 1        # form khaali
+    st.rerun()
+
+
+def save_entry(db, table, fields, labels, pics, values, uploads):
+    """Entry save karta hai. Safal hone par photo list, warna galti ka sandesh (str) lautata hai."""
+    any_photo = any(u is not None for u in uploads.values())
     row, req_missing = {}, []
     for c in fields:
         name = c["column_name"]
         try:
             v = to_db_value(c, values.get(name))
         except (ValueError, json.JSONDecodeError):
-            st.error(f"'{labels.get(name, pretty(name))}' ki value sahi nahi hai.")
-            return
+            return f"'{labels.get(name, pretty(name))}' ki value sahi nahi hai."
         if v is None and not c["is_nullable"] and not c["has_default"]:
             req_missing.append(labels.get(name, pretty(name)))
         if v is not None:
             row[name] = v
     if req_missing:
-        st.error("Ye fields bharna zaroori hai: " + ", ".join(req_missing))
-        return
+        return "Ye fields bharna zaroori hai: " + ", ".join(req_missing)
     text_filled = any(isinstance(v, str) for v in row.values())
     if not row and not any_photo:
-        st.error("Form khaali hai. Pehle details bharein, phir Save dabayein.")
-        return
-    if any(c["data_type"] in ("text", "character varying") for c in fields) and not text_filled \
-            and not any_photo:
-        st.error("Naam / details bharein, khaali entry save nahi hogi.")
-        return
+        return "Form khaali hai. Pehle details bharein, phir Save dabayein."
+    if any(c["data_type"] in ("text", "character varying") for c in fields) \
+            and not text_filled and not any_photo:
+        return "Naam / details bharein, khaali entry save nahi hogi."
+
+    # Duplicate jaanch: bilkul wahi entry 2 minute ke andar dobara save na ho
+    photo_sig = sorted((col, getattr(u, "name", ""), getattr(u, "size", 0))
+                       for col, u in uploads.items() if u is not None)
+    fp = hashlib.md5(json.dumps([table, row, photo_sig], sort_keys=True, default=str)
+                     .encode()).hexdigest()
+    last = st.session_state.get(f"{table}_last_fp")
+    if last and last[0] == fp and _time.time() - last[1] < 120:
+        return "⚠️ Ye entry abhi-abhi save ho chuki hai, isliye dobara save nahi ki gayi."
 
     try:
-        with st.spinner("Save ho raha hai... (photo upload mein thoda samay lag sakta hai)"):
+        with st.spinner("Save ho raha hai... Pls Wait"):
             for f in pics:
                 if uploads.get(f["col"]) is not None:
                     row[f["col"]] = save_image(db, uploads[f["col"]], f["folder"])
             db.insert(table, row)
     except Exception as e:
-        st.error(f"❌ Save nahi hua: {e}")
-        return
+        return f"❌ Save nahi hua: {e}"
 
-    st.session_state[f"{table}_done"] = [(f["label"], row[f["col"]]) for f in pics
-                                         if row.get(f["col"])]
-    st.session_state[ver_key] = ver + 1          # form khaali
-    st.rerun()
+    st.session_state[f"{table}_last_fp"] = (fp, _time.time())
+    return [(f["label"], row[f["col"]]) for f in pics if row.get(f["col"])]
 
 
 # ------------------------------------------------------------------ records + images
