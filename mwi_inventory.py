@@ -215,34 +215,61 @@ def find_col(cols: list[dict], lower_name: str) -> str | None:
 
 
 # ------------------------------------------------------------------ entry form
+IMG_TYPES = ["jpg", "jpeg", "png", "webp", "bmp"]
+
+
+def photo_picker(label: str, key: str):
+    """Gallery se file ya seedhe Camera se photo. Photo aane par preview dikhata hai."""
+    st.markdown(f"**{label}**")
+    mode = st.radio(label, ["📁 Gallery", "📸 Camera"], horizontal=True,
+                    key=key + "_mode", label_visibility="collapsed")
+    if mode == "📸 Camera":
+        f = st.camera_input(label, key=key + "_cam", label_visibility="collapsed")
+    else:
+        f = st.file_uploader(label, type=IMG_TYPES, key=key + "_file",
+                             label_visibility="collapsed")
+    if f is not None:
+        st.image(f, width=160)
+        st.caption("✔ Photo ready – ab Save dabayein")
+    return f
+
+
 def entry_form(db: Supabase, table: str, cols: list[dict]):
     old_col, new_col = find_col(cols, OLD_COL), find_col(cols, NEW_COL)
     pic_cols = {old_col, new_col} - {None}
     fields = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols]
 
-    with st.form(f"form_{table}", clear_on_submit=True):
-        values = {}
-        grid = st.columns(2)
-        for i, c in enumerate(fields):
-            with grid[i % 2]:
-                values[c["column_name"]] = input_for(c, f"{table}_{c['column_name']}")
+    # Save ke baad form khaali karne ke liye har baar naye widget keys
+    ver_key = f"{table}_ver"
+    ver = st.session_state.setdefault(ver_key, 0)
+    k = f"{table}_v{ver}"
 
-        old_up = new_up = None
-        if pic_cols:
-            st.markdown("**📷 Parts Photo**")
-            p1, p2 = st.columns(2)
-            if old_col:
-                old_up = p1.file_uploader("Damage Parts Photo",
-                                          type=["jpg", "jpeg", "png", "webp", "bmp"],
-                                          key=f"{table}_old_up")
-            if new_col:
-                new_up = p2.file_uploader("New Parts Photo",
-                                          type=["jpg", "jpeg", "png", "webp", "bmp"],
-                                          key=f"{table}_new_up")
+    done = st.session_state.pop(f"{table}_done", None)
+    if done is not None:
+        st.success(f"✅ {TABLES[table]} mein entry save ho gayi!")
+        if done:
+            for colx, (t, u) in zip(st.columns(len(done)), done):
+                colx.image(u, caption=t, width=200)
 
-        submitted = st.form_submit_button("💾 Save", type="primary",
-                                          use_container_width=True)
+    values = {}
+    grid = st.columns(2)
+    for i, c in enumerate(fields):
+        with grid[i % 2]:
+            values[c["column_name"]] = input_for(c, f"{k}_{c['column_name']}")
 
+    old_up = new_up = None
+    if pic_cols:
+        st.markdown("#### 📷 Parts Photo")
+        p1, p2 = st.columns(2)
+        if old_col:
+            with p1:
+                old_up = photo_picker("Damage Parts Photo", f"{k}_old")
+        if new_col:
+            with p2:
+                new_up = photo_picker("New Parts Photo", f"{k}_new")
+
+    submitted = st.button("💾 Save", type="primary", use_container_width=True,
+                          key=f"{k}_save")
     if not submitted:
         return
 
@@ -262,9 +289,17 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
     if missing:
         st.error("Ye fields bharna zaroori hai: " + ", ".join(missing))
         return
+    text_filled = any(isinstance(v, str) for v in row.values())
+    if not row and old_up is None and new_up is None:
+        st.error("Form khaali hai. Pehle details bharein, phir Save dabayein.")
+        return
+    if any(c["data_type"] in ("text", "character varying") for c in fields) and not text_filled \
+            and old_up is None and new_up is None:
+        st.error("Naam / details bharein, khaali entry save nahi hogi.")
+        return
 
     try:
-        with st.spinner("Save ho raha hai..."):
+        with st.spinner("Save ho raha hai... (photo upload mein thoda samay lag sakta hai)"):
             if old_up is not None:
                 row[old_col] = save_image(db, old_up, OLD_FOLDER)
             if new_up is not None:
@@ -274,12 +309,11 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         st.error(f"❌ Save nahi hua: {e}")
         return
 
-    st.success(f"✅ {TABLES[table]} mein entry save ho gayi!")
-    pics = [(t, row.get(c)) for t, c in (("Old", old_col), ("New", new_col)) if c and row.get(c)]
-    if pics:
-        cols_ = st.columns(len(pics))
-        for colx, (t, u) in zip(cols_, pics):
-            colx.image(u, caption=f"{t} photo (cloud mein save)", width=220)
+    st.session_state[f"{table}_done"] = [
+        (t, row[c]) for t, c in (("Damage Parts Photo", old_col), ("New Parts Photo", new_col))
+        if c and row.get(c)]
+    st.session_state[ver_key] = ver + 1          # form khaali
+    st.rerun()
 
 
 # ------------------------------------------------------------------ records + images
