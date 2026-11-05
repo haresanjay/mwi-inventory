@@ -1,10 +1,10 @@
 """
 MWI Print – Inventory Entry Form (Python + Streamlit + Supabase)
 
-Tables : Machine_Parts, paper, PDF_DETAIL, Toner
+Tables : Machine_Counter, Machine_Parts, PDF_DETAIL, Paper_Table, Toner
 Images : Supabase Storage (cloud) ke bucket "parts_images" mein
-         Machine_Parts ki purani photo  -> parts_images/old_parts/
-         Machine_Parts ki nayi photo    -> parts_images/new_parts/
+         Machine_Parts   Old / New photo     -> old_parts/   , new_parts/
+         Machine_Counter IN / OUT photo      -> counter_in/  , counter_out/
          Database mein photo ka public link (URL) save hota hai,
          isliye photo kisi bhi computer ya mobile se dikhti hai.
 
@@ -21,6 +21,8 @@ IST = timezone(timedelta(hours=5, minutes=30), "IST")   # India ka samay
 
 def now_ist() -> datetime:
     return datetime.now(IST)
+
+
 from pathlib import Path
 
 import pandas as pd
@@ -34,13 +36,34 @@ SETTINGS_FILE = APP_DIR / "mwi_settings.json"
 DEFAULT_URL = "https://bemtbxxbcgvdsjziytmn.supabase.co"
 
 TABLES = {
+    "Machine_Counter": "🔢 Machine Counter",
     "Machine_Parts": "⚙️ Machine Parts",
-    "paper": "📄 Paper",
     "PDF_DETAIL": "📑 PDF Detail",
+    "Paper_Table": "📄 Paper",
     "Toner": "🖨️ Toner",
 }
-OLD_COL, NEW_COL = "old_item_pic_path", "new_item_pic_path"   # lower-case match
-OLD_FOLDER, NEW_FOLDER = "old_parts", "new_parts"
+
+# Kis table ke kis column mein photo aayegi (column naam chhote/bade akshar se farq nahi padta)
+PHOTOS = {
+    "Machine_Parts": {
+        "heading": "Parts Photo", "item": "Part",
+        "fields": [
+            {"col": "old_item_pic_path", "label": "Damage Parts Photo", "folder": "old_parts",
+             "button": "🔧 Old Parts Image", "title": "Purana Part (Old)"},
+            {"col": "new_item_pic_path", "label": "New Parts Photo", "folder": "new_parts",
+             "button": "✨ New Parts Image", "title": "Naya Part (New)"},
+        ],
+    },
+    "Machine_Counter": {
+        "heading": "Counter Photo", "item": "Entry",
+        "fields": [
+            {"col": "machine_counter_in_photo_path", "label": "Counter IN Photo",
+             "folder": "counter_in", "button": "📥 Counter IN Image", "title": "Counter IN"},
+            {"col": "machine_counter_out_photo_path", "label": "Counter OUT Photo",
+             "folder": "counter_out", "button": "📤 Counter OUT Image", "title": "Counter OUT"},
+        ],
+    },
+}
 BUCKET = "parts_images"
 MAX_IMG_SIDE = 1600      # photo isse badi ho to chhoti kar di jaati hai (jagah bachane ke liye)
 JPEG_QUALITY = 82
@@ -135,7 +158,7 @@ def compress_image(uploaded) -> bytes:
 
 
 def save_image(db: "Supabase", uploaded, folder_name: str) -> str:
-    """Photo ko cloud ke old_parts/ ya new_parts/ folder mein daalta hai, public URL lautata hai."""
+    """Photo ko cloud ke folder (old_parts/, counter_in/ ...) mein daalta hai, public URL lautata hai."""
     name = f"{folder_name}_{now_ist():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}.jpg"
     return db.upload(f"{folder_name}/{name}", compress_image(uploaded))
 
@@ -149,10 +172,12 @@ def image_src(db: "Supabase", value) -> str | None:
         return None
     if v.startswith("http"):
         return v
-    if v.startswith((OLD_FOLDER + "/", NEW_FOLDER + "/")):   # sirf path save hua ho
-        return db.public_url(v)
     p = Path(v) if Path(v).is_absolute() else APP_DIR / v    # purani local photo
-    return str(p) if p.exists() else None
+    if p.exists():
+        return str(p)
+    if "/" in v and not Path(v).is_absolute():               # sirf cloud path save hua ho
+        return db.public_url(v.lstrip("/"))
+    return None
 
 
 # ------------------------------------------------------------------ form helpers
@@ -220,6 +245,23 @@ def find_col(cols: list[dict], lower_name: str) -> str | None:
     return None
 
 
+def photo_fields(table: str, cols: list[dict]) -> list[dict]:
+    """Is table ke photo columns (jo database mein sach mein maujood hain)."""
+    out = []
+    for f in PHOTOS.get(table, {}).get("fields", []):
+        real = find_col(cols, f["col"])
+        if real:
+            out.append({**f, "col": real})
+    known = {f["col"] for f in out}
+    for c in cols:                       # naya photo column bina config ke bhi chalega
+        n = c["column_name"]
+        if n not in known and n.lower().endswith(("photo_path", "pic_path")):
+            out.append({"col": n, "label": pretty(n.replace("_Path", "").replace("_path", "")),
+                        "folder": n.lower().replace("_path", ""), "button": "🖼️ " + pretty(n),
+                        "title": pretty(n)})
+    return out
+
+
 # ------------------------------------------------------------------ entry form
 IMG_TYPES = ["jpg", "jpeg", "png", "webp", "bmp"]
 
@@ -241,8 +283,8 @@ def photo_picker(label: str, key: str):
 
 
 def entry_form(db: Supabase, table: str, cols: list[dict]):
-    old_col, new_col = find_col(cols, OLD_COL), find_col(cols, NEW_COL)
-    pic_cols = {old_col, new_col} - {None}
+    pics = photo_fields(table, cols)
+    pic_cols = {f["col"] for f in pics}
     fields = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols]
 
     # Save ke baad form khaali karne ke liye har baar naye widget keys
@@ -263,16 +305,13 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         with grid[i % 2]:
             values[c["column_name"]] = input_for(c, f"{k}_{c['column_name']}")
 
-    old_up = new_up = None
-    if pic_cols:
-        st.markdown("#### 📷 Parts Photo")
-        p1, p2 = st.columns(2)
-        if old_col:
-            with p1:
-                old_up = photo_picker("Damage Parts Photo", f"{k}_old")
-        if new_col:
-            with p2:
-                new_up = photo_picker("New Parts Photo", f"{k}_new")
+    uploads = {}                                   # column -> photo
+    if pics:
+        st.markdown(f"#### 📷 {PHOTOS.get(table, {}).get('heading', 'Photo')}")
+        for colx, f in zip(st.columns(len(pics)), pics):
+            with colx:
+                uploads[f["col"]] = photo_picker(f["label"], f"{k}_{f['col']}")
+    any_photo = any(u is not None for u in uploads.values())
 
     submitted = st.button("💾 Save", type="primary", use_container_width=True,
                           key=f"{k}_save")
@@ -296,28 +335,26 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         st.error("Ye fields bharna zaroori hai: " + ", ".join(missing))
         return
     text_filled = any(isinstance(v, str) for v in row.values())
-    if not row and old_up is None and new_up is None:
+    if not row and not any_photo:
         st.error("Form khaali hai. Pehle details bharein, phir Save dabayein.")
         return
     if any(c["data_type"] in ("text", "character varying") for c in fields) and not text_filled \
-            and old_up is None and new_up is None:
+            and not any_photo:
         st.error("Naam / details bharein, khaali entry save nahi hogi.")
         return
 
     try:
         with st.spinner("Save ho raha hai... (photo upload mein thoda samay lag sakta hai)"):
-            if old_up is not None:
-                row[old_col] = save_image(db, old_up, OLD_FOLDER)
-            if new_up is not None:
-                row[new_col] = save_image(db, new_up, NEW_FOLDER)
+            for f in pics:
+                if uploads.get(f["col"]) is not None:
+                    row[f["col"]] = save_image(db, uploads[f["col"]], f["folder"])
             db.insert(table, row)
     except Exception as e:
         st.error(f"❌ Save nahi hua: {e}")
         return
 
-    st.session_state[f"{table}_done"] = [
-        (t, row[c]) for t, c in (("Damage Parts Photo", old_col), ("New Parts Photo", new_col))
-        if c and row.get(c)]
+    st.session_state[f"{table}_done"] = [(f["label"], row[f["col"]]) for f in pics
+                                         if row.get(f["col"])]
     st.session_state[ver_key] = ver + 1          # form khaali
     st.rerun()
 
@@ -342,43 +379,43 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         elif c["data_type"] == "date" and c["column_name"] in df.columns:
             t = pd.to_datetime(df[c["column_name"]], errors="coerce")
             df[c["column_name"]] = t.dt.strftime("%d-%m-%Y")
-    old_col, new_col = find_col(cols, OLD_COL), find_col(cols, NEW_COL)
+    pics = [f for f in photo_fields(table, cols) if f["col"] in df.columns]
+    pic_cols = [f["col"] for f in pics]
 
     view = df.copy()
     cfg = {}
-    for c, title in ((old_col, "Old Photo"), (new_col, "New Photo")):
-        if c and c in view.columns:
-            view[c] = view[c].map(lambda v: image_src(db, v) if str(v).startswith(("http", OLD_FOLDER, NEW_FOLDER)) else None)
-            cfg[c] = st.column_config.ImageColumn(title, width="small")
+    for f in pics:
+        view[f["col"]] = view[f["col"]].map(lambda v: image_src(db, v))
+        cfg[f["col"]] = st.column_config.ImageColumn(f["label"], width="small")
     st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg)
     st.download_button("⬇️ Excel (CSV) download", df.to_csv(index=False).encode("utf-8-sig"),
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
 
-    if not (old_col or new_col):
+    if not pics:
         return
 
+    conf = PHOTOS.get(table, {})
     st.divider()
-    st.subheader("🖼️ Parts Photo")
-    show_cols = [c for c in df.columns if c not in (old_col, new_col)][:3]
+    st.subheader(f"🖼️ {conf.get('heading', 'Photo')}")
+    show_cols = [c for c in df.columns if c not in pic_cols][:3]
     labels = {i: " | ".join(str(df.at[i, c]) for c in show_cols) for i in df.index}
-    idx = st.selectbox("Part chunein", list(labels), format_func=labels.get,
-                       key=f"{table}_pick")
+    idx = st.selectbox(f"{conf.get('item', 'Entry')} chunein", list(labels),
+                       format_func=labels.get, key=f"{table}_pick")
 
     state_key = f"{table}_show_img"
-    b1, b2 = st.columns(2)
-    if old_col and b1.button("🔧 Old Parts Image", use_container_width=True, key=f"{table}_bo"):
-        st.session_state[state_key] = (idx, "old")
-    if new_col and b2.button("✨ New Parts Image", use_container_width=True, key=f"{table}_bn"):
-        st.session_state[state_key] = (idx, "new")
+    for n, (colx, f) in enumerate(zip(st.columns(len(pics)), pics)):
+        if colx.button(f["button"], use_container_width=True, key=f"{table}_b{n}"):
+            st.session_state[state_key] = (idx, f["col"])
 
     chosen = st.session_state.get(state_key)
     if not chosen or chosen[0] != idx:
         return
-    which = chosen[1]
-    col = old_col if which == "old" else new_col
-    raw = df.at[idx, col] if col in df.columns else None
+    f = next((x for x in pics if x["col"] == chosen[1]), None)
+    if f is None:
+        return
+    raw = df.at[idx, f["col"]]
     src = image_src(db, raw)
-    title = "Purana Part (Old)" if which == "old" else "Naya Part (New)"
+    title = f["title"]
     if src is None:
         if raw is None or (isinstance(raw, float) and pd.isna(raw)) or not str(raw).strip():
             st.warning(f"Is entry mein {title} ki photo nahi daali gayi thi.")
@@ -420,8 +457,7 @@ def connection_sidebar() -> tuple[str, str]:
             get_columns.clear()
             st.success("Save ho gaya.")
             st.rerun()
-        st.caption(f"☁️ Photos Supabase Storage mein save hoti hain:\n\n"
-                   f"`{BUCKET}/{OLD_FOLDER}/`\n\n`{BUCKET}/{NEW_FOLDER}/`")
+        st.caption(f"☁️ Photos Supabase Storage ke `{BUCKET}` bucket mein save hoti hain.")
         if st.button("🔄 Columns Refresh", use_container_width=True):
             get_columns.clear()
             st.rerun()
