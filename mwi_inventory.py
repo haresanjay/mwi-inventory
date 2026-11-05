@@ -126,25 +126,53 @@ FIELD_ORDER = {
                               "total_paper", "paper_qty", "sheets"], "No_of_Paper", "integer"),
             F("Consumption Paper", ["consumption_paper", "paper_consumption", "consumption",
                                     "consumed_paper", "used_paper"], "Consumption_Paper", "integer"),
+            F("Balance Paper Qty", ["balance_paper_qty", "balance_paper", "paper_balance",
+                                    "paper_balance_qty", "balance_qty", "balance"],
+              "Balance_Paper_Qty", "integer"),
         ],
     },
 }
 
 
-# Apne-aap hisaab wale fields:  target = a - b   (form mein bharna nahi padta)
+# Apne-aap hisaab wale fields (form mein bharna nahi padta). Upar se neeche kram mein chalte hain.
+def _minus(a, b):
+    return a - (b or 0)
+
+
 CALC = {
-    "Toner": {"target": "Toner Balance Qty", "a": "Toner Qty", "b": "Toner Used"},
+    "Toner": [
+        {"target": "Toner Balance Qty", "uses": ["Toner Qty", "Toner Used"], "fn": _minus,
+         "desc": "Toner Qty − Toner Used", "no_negative": True},
+    ],
+    "Paper_Table": [
+        {"target": "No of Paper", "uses": ["Qty Rim"], "fn": lambda rim: rim * 500,
+         "desc": "Qty Rim × 500"},
+        {"target": "Balance Paper Qty", "uses": ["No of Paper", "Consumption Paper"], "fn": _minus,
+         "desc": "No of Paper − Consumption Paper", "no_negative": True},
+    ],
 }
 
 
-def calc_cols(table: str, labels: dict) -> tuple | None:
-    """CALC ke labels ko asli column naam mein badalta hai: (target, a, b)"""
-    conf = CALC.get(table)
-    if not conf:
-        return None
+def calc_rules(table: str, labels: dict) -> list[dict]:
+    """CALC ke labels ko asli column naam se jodta hai (sirf wahi niyam jinke column maujood hain)."""
     by_label = {lbl: col for col, lbl in labels.items()}
-    t, a, b = (by_label.get(conf[x]) for x in ("target", "a", "b"))
-    return (t, a, b) if t and a and b else None
+    out = []
+    for r in CALC.get(table, []):
+        cols = [by_label.get(x) for x in [r["target"]] + r["uses"]]
+        if all(cols):
+            out.append({**r, "t_col": cols[0], "u_cols": cols[1:]})
+    return out
+
+
+def run_rule(rule: dict, values: dict, types: dict):
+    """Ek niyam ka hisaab. Pehla value khaali ho to None."""
+    args = [values.get(c) for c in rule["u_cols"]]
+    if args[0] is None:
+        return None
+    res = rule["fn"](*args)
+    if types.get(rule["t_col"]) in INT_TYPES:
+        res = int(round(res))
+    return res
 
 
 def norm(name: str) -> str:
@@ -421,20 +449,21 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
             st.code(missing_sql(table, missing), language="sql")
 
     by_name = {c["column_name"]: c for c in fields}
-    calc = calc_cols(table, labels)
+    rules = {r["t_col"]: r for r in calc_rules(table, labels)}
+    types = {c["column_name"]: c["data_type"] for c in fields}
     values = {}
     grid = st.columns(2)
     for i, (name, label) in enumerate(ordered):
         with grid[i % 2]:
-            if calc and name == calc[0]:           # apne-aap hisaab, bharna nahi
-                a, b = values.get(calc[1]), values.get(calc[2])
-                res = (a or 0) - (b or 0) if a is not None else None
-                st.text_input(f"{label} (Auto = {labels[calc[1]]} − {labels[calc[2]]})",
+            if name in rules:                      # apne-aap hisaab, bharna nahi
+                r = rules[name]
+                res = run_rule(r, values, types)
+                st.text_input(f"{label} (Auto = {r['desc']})",
                               value="" if res is None else f"{res:g}", disabled=True,
                               key=f"{k}_{name}_auto_{res}")
-                if res is not None and res < 0:
-                    st.caption(f"⚠️ {labels[calc[2]]}, {labels[calc[1]]} se zyada hai")
-                values[name] = None
+                if r.get("no_negative") and res is not None and res < 0:
+                    st.caption(f"⚠️ {r['uses'][1]}, {r['uses'][0]} se zyada hai")
+                values[name] = res
             else:
                 values[name] = input_for(by_name[name], f"{k}_{name}", label)
 
@@ -491,15 +520,16 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
     if req_missing:
         return "Ye fields bharna zaroori hai: " + ", ".join(req_missing)
 
-    # Apne-aap hisaab:  Toner Balance Qty = Toner Qty - Toner Used
-    calc = calc_cols(table, labels)
-    if calc:
-        t, a, b = calc
-        row.pop(t, None)
-        if a in row:
-            row[t] = row[a] - row.get(b, 0)
-            if row[t] < 0:
-                return f"{labels[b]}, {labels[a]} se zyada nahi ho sakta."
+    # Apne-aap hisaab (Toner Balance, No of Paper, Balance Paper Qty ...)
+    types = {c["column_name"]: c["data_type"] for c in fields}
+    for r in calc_rules(table, labels):
+        row.pop(r["t_col"], None)
+        res = run_rule(r, row, types)
+        if res is None:
+            continue
+        if r.get("no_negative") and res < 0:
+            return f"{r['uses'][1]}, {r['uses'][0]} se zyada nahi ho sakta."
+        row[r["t_col"]] = res
     text_filled = any(isinstance(v, str) for v in row.values())
     if not row and not any_photo:
         return "Form khaali hai. Pehle details bharein, phir Save dabayein."
