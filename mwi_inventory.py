@@ -101,6 +101,8 @@ FIELD_ORDER = {
     },
     "Toner": {
         "first": [
+            F("Toner Received Date", ["toner_received_date", "toner_receive_date", "received_date",
+                                      "receive_date", "toner_date", "date"], "Toner_Received_Date", "date"),
             F("Invoice No", ["invoice_no", "invoice_number", "invoice", "bill_no"], "Invoice_No", "text"),
             F("Toner Company", ["toner_company", "company", "company_name", "brand", "toner_brand"],
               "Toner_Company", "text"),
@@ -127,6 +129,22 @@ FIELD_ORDER = {
         ],
     },
 }
+
+
+# Apne-aap hisaab wale fields:  target = a - b   (form mein bharna nahi padta)
+CALC = {
+    "Toner": {"target": "Toner Balance Qty", "a": "Toner Qty", "b": "Toner Used"},
+}
+
+
+def calc_cols(table: str, labels: dict) -> tuple | None:
+    """CALC ke labels ko asli column naam mein badalta hai: (target, a, b)"""
+    conf = CALC.get(table)
+    if not conf:
+        return None
+    by_label = {lbl: col for col, lbl in labels.items()}
+    t, a, b = (by_label.get(conf[x]) for x in ("target", "a", "b"))
+    return (t, a, b) if t and a and b else None
 
 
 def norm(name: str) -> str:
@@ -403,11 +421,22 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
             st.code(missing_sql(table, missing), language="sql")
 
     by_name = {c["column_name"]: c for c in fields}
+    calc = calc_cols(table, labels)
     values = {}
     grid = st.columns(2)
     for i, (name, label) in enumerate(ordered):
         with grid[i % 2]:
-            values[name] = input_for(by_name[name], f"{k}_{name}", label)
+            if calc and name == calc[0]:           # apne-aap hisaab, bharna nahi
+                a, b = values.get(calc[1]), values.get(calc[2])
+                res = (a or 0) - (b or 0) if a is not None else None
+                st.text_input(f"{label} (Auto = {labels[calc[1]]} − {labels[calc[2]]})",
+                              value="" if res is None else f"{res:g}", disabled=True,
+                              key=f"{k}_{name}_auto_{res}")
+                if res is not None and res < 0:
+                    st.caption(f"⚠️ {labels[calc[2]]}, {labels[calc[1]]} se zyada hai")
+                values[name] = None
+            else:
+                values[name] = input_for(by_name[name], f"{k}_{name}", label)
 
     uploads = {}                                   # column -> photo
     if pics:
@@ -462,14 +491,15 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
     if req_missing:
         return "Ye fields bharna zaroori hai: " + ", ".join(req_missing)
 
-    # Toner: Balance khaali chhoda ho to apne-aap  Toner Qty - Toner Used
-    if table == "Toner":
-        by_label = {lbl: col for col, lbl in labels.items()}
-        q, u, b = (by_label.get(x) for x in ("Toner Qty", "Toner Used", "Toner Balance Qty"))
-        if q and u and b and b not in row and q in row:
-            row[b] = row[q] - row.get(u, 0)
-            if row[b] < 0:
-                return "Toner Used, Toner Qty se zyada nahi ho sakta."
+    # Apne-aap hisaab:  Toner Balance Qty = Toner Qty - Toner Used
+    calc = calc_cols(table, labels)
+    if calc:
+        t, a, b = calc
+        row.pop(t, None)
+        if a in row:
+            row[t] = row[a] - row.get(b, 0)
+            if row[t] < 0:
+                return f"{labels[b]}, {labels[a]} se zyada nahi ho sakta."
     text_filled = any(isinstance(v, str) for v in row.values())
     if not row and not any_photo:
         return "Form khaali hai. Pehle details bharein, phir Save dabayein."
