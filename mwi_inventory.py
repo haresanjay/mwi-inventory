@@ -532,10 +532,10 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
         row[r["t_col"]] = res
     text_filled = any(isinstance(v, str) for v in row.values())
     if not row and not any_photo:
-        return "Form khaali hai. Pehle details bharein, phir Save dabayein."
+        return "Form is Empty ?"
     if any(c["data_type"] in ("text", "character varying") for c in fields) \
             and not text_filled and not any_photo:
-        return "Naam / details bharein, khaali entry save nahi hogi."
+        return "Form is Empty ?"
 
     # Duplicate jaanch: bilkul wahi entry 2 minute ke andar dobara save na ho
     photo_sig = sorted((col, getattr(u, "name", ""), getattr(u, "size", 0))
