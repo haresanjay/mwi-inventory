@@ -14,7 +14,13 @@ Chalane ke liye:  run_app.bat  par double-click   (ya:  streamlit run mwi_invent
 import io
 import json
 import uuid
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")   # India ka samay
+
+
+def now_ist() -> datetime:
+    return datetime.now(IST)
 from pathlib import Path
 
 import pandas as pd
@@ -130,7 +136,7 @@ def compress_image(uploaded) -> bytes:
 
 def save_image(db: "Supabase", uploaded, folder_name: str) -> str:
     """Photo ko cloud ke old_parts/ ya new_parts/ folder mein daalta hai, public URL lautata hai."""
-    name = f"{folder_name}_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}.jpg"
+    name = f"{folder_name}_{now_ist():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}.jpg"
     return db.upload(f"{folder_name}/{name}", compress_image(uploaded))
 
 
@@ -167,13 +173,13 @@ def input_for(col: dict, key: str):
     if dt == "boolean":
         return st.checkbox(pretty(name), key=key)
     if dt == "date":
-        return st.date_input(label, value=date.today(), format="DD/MM/YYYY", key=key)
+        return st.date_input(label, value=now_ist().date(), format="DD/MM/YYYY", key=key)
     if dt.startswith("timestamp"):
         c1, c2 = st.columns(2)
-        d = c1.date_input(label, value=date.today(), format="DD/MM/YYYY", key=key + "_d")
-        t = c2.time_input("Time", value=datetime.now().time().replace(second=0, microsecond=0),
+        d = c1.date_input(label, value=now_ist().date(), format="DD/MM/YYYY", key=key + "_d")
+        t = c2.time_input("Time", value=now_ist().time().replace(second=0, microsecond=0, tzinfo=None),
                           key=key + "_t")
-        return datetime.combine(d, t) if d else None
+        return datetime.combine(d, t, tzinfo=IST) if d else None
     if dt.startswith("time"):
         return st.time_input(label, value=None, key=key)
     if dt in ("json", "jsonb"):
@@ -329,6 +335,13 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.info("Abhi koi entry nahi hai.")
         return
     df = pd.DataFrame(rows)
+    for c in cols:                         # UTC -> India ka samay
+        if c["data_type"].startswith("timestamp") and c["column_name"] in df.columns:
+            t = pd.to_datetime(df[c["column_name"]], utc=True, errors="coerce")
+            df[c["column_name"]] = t.dt.tz_convert(IST).dt.strftime("%d-%m-%Y %I:%M %p")
+        elif c["data_type"] == "date" and c["column_name"] in df.columns:
+            t = pd.to_datetime(df[c["column_name"]], errors="coerce")
+            df[c["column_name"]] = t.dt.strftime("%d-%m-%Y")
     old_col, new_col = find_col(cols, OLD_COL), find_col(cols, NEW_COL)
 
     view = df.copy()
