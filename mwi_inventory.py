@@ -33,6 +33,11 @@ import requests
 import streamlit as st
 from PIL import Image, ImageOps
 
+try:
+    import ocr_counter                     # Machine Counter photo ka OCR
+except Exception:                          # file na ho to baaki app chalta rahe
+    ocr_counter = None
+
 # ------------------------------------------------------------------ settings
 APP_DIR = Path(__file__).resolve().parent
 SETTINGS_FILE = APP_DIR / "mwi_settings.json"
@@ -84,6 +89,18 @@ FIELD_ORDER = {
     "Machine_Counter": {
         "first": [
             F("Machine No", ["machine_no", "machine_number", "mc_no", "machine"], "Machine_No", "text"),
+            F("Model (IN)", ["model_in", "in_model"], "Model_in", "text"),
+            F("Serial Number (IN)", ["serial_number_in", "serial_no_in", "serial_in"],
+              "Serial_Number_in", "text"),
+            F("Reading Date (IN)", ["reading_date_in", "date_in"], "Reading_Date_in", "date"),
+            F("Counter No (IN)", ["counter_no_in", "counter_in"], "Counter_No_in", "text"),
+            F("Total (IN)", ["total_in", "total_count_in", "count_in"], "Total_in", "bigint"),
+            F("Model (OUT)", ["model_out", "out_model"], "Model_out", "text"),
+            F("Serial Number (OUT)", ["serial_number_out", "serial_no_out", "serial_out"],
+              "Serial_Number_out", "text"),
+            F("Reading Date (OUT)", ["reading_date_out", "date_out"], "Reading_Date_out", "date"),
+            F("Counter No (OUT)", ["counter_no_out", "counter_out"], "Counter_No_out", "text"),
+            F("Total (OUT)", ["total_out", "total_count_out", "count_out"], "Total_out", "bigint"),
         ],
         "last": [
             F("Reason", ["reason", "remark", "remarks"], "Reason", "text"),
@@ -132,6 +149,21 @@ FIELD_ORDER = {
         ],
     },
 }
+
+
+# Photo ka OCR karke kaun-sa field bharna hai:  photo column -> {OCR value: field label}
+OCR_MAP = {
+    "Machine_Counter": {
+        "machine_counter_in_photo_path": {
+            "model": "Model (IN)", "serial": "Serial Number (IN)", "date": "Reading Date (IN)",
+            "counter": "Counter No (IN)", "total": "Total (IN)"},
+        "machine_counter_out_photo_path": {
+            "model": "Model (OUT)", "serial": "Serial Number (OUT)", "date": "Reading Date (OUT)",
+            "counter": "Counter No (OUT)", "total": "Total (OUT)"},
+    },
+}
+OCR_NAMES = {"model": "Model", "serial": "Serial Number", "date": "Reading Date",
+             "counter": "Counter No", "total": "Total"}
 
 
 # Apne-aap hisaab wale fields (form mein bharna nahi padta). Upar se neeche kram mein chalte hain.
@@ -310,10 +342,12 @@ def input_for(col: dict, key: str, label: str | None = None):
     if dt == "boolean":
         return st.checkbox(label, key=key)
     if dt == "date":
-        return st.date_input(label, value=now_ist().date(), format="DD/MM/YYYY", key=key)
+        dv = {} if key in st.session_state else {"value": now_ist().date()}
+        return st.date_input(label, format="DD/MM/YYYY", key=key, **dv)
     if dt.startswith("timestamp"):
         c1, c2 = st.columns(2)
-        d = c1.date_input(label, value=now_ist().date(), format="DD/MM/YYYY", key=key + "_d")
+        dv = {} if key + "_d" in st.session_state else {"value": now_ist().date()}
+        d = c1.date_input(label, format="DD/MM/YYYY", key=key + "_d", **dv)
         t = c2.time_input("Time", value=now_ist().time().replace(second=0, microsecond=0, tzinfo=None),
                           key=key + "_t")
         return datetime.combine(d, t, tzinfo=IST) if d else None
@@ -423,6 +457,78 @@ def photo_picker(label: str, key: str):
     return f
 
 
+def ocr_key() -> str:
+    try:
+        return str(st.secrets.get("OCR_SPACE_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def set_widget(col: dict, key: str, value):
+    """OCR se mili value ko form ke box mein daalta hai (box ke type ke hisaab se)."""
+    dt = col["data_type"]
+    ss = st.session_state
+    if isinstance(value, date):
+        if dt == "date":
+            ss[key] = value
+        elif dt.startswith("timestamp"):
+            ss[key + "_d"] = value
+        else:
+            ss[key] = value.strftime("%d-%m-%Y")
+        return
+    if dt in INT_TYPES:
+        try:
+            ss[key] = int(re.sub(r"\D", "", str(value)))
+        except ValueError:
+            pass
+    elif dt in NUM_TYPES:
+        try:
+            ss[key] = float(value)
+        except ValueError:
+            pass
+    else:
+        ss[key] = str(value)
+
+
+def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str):
+    """Nayi photo aane par OCR karke us group ke fields bharta hai."""
+    sig_key, res_key = f"{k}_{pcol}_ocrsig", f"{k}_{pcol}_ocrres"
+    sig = (getattr(photo, "file_id", None) or getattr(photo, "name", ""), getattr(photo, "size", 0))
+    if st.session_state.get(sig_key) != sig:
+        if ocr_counter is None:
+            st.session_state[res_key] = ({}, "", "", "ocr_counter.py file nahi mili")
+        else:
+            with st.spinner("🔍 Photo padh raha hai (OCR)... Pls Wait"):
+                try:
+                    data, text, engine = ocr_counter.read_photo(photo.getvalue(), ocr_key())
+                    for kk, col in targets.items():
+                        if kk in data:
+                            set_widget(by_name[col], f"{k}_{col}", data[kk])
+                    st.session_state[res_key] = (data, text, engine, "")
+                except Exception as e:
+                    st.session_state[res_key] = ({}, "", "", str(e))
+        st.session_state[sig_key] = sig
+
+    data, text, engine, err = st.session_state.get(res_key, ({}, "", "", ""))
+    if err:
+        st.warning(f"OCR nahi ho saka: {err}. Values haath se bharein.")
+        return
+    got = [OCR_NAMES[x] for x in targets if x in data]
+    miss = [OCR_NAMES[x] for x in targets if x not in data]
+    msg = f"🔍 OCR ({engine}): {len(got)}/{len(targets)} values bhari gayi"
+    if miss:
+        msg += " – nahi mili: " + ", ".join(miss)
+        st.warning(msg + ". Inhe haath se bharein.")
+    else:
+        st.info(msg + ". Save se pehle ek baar jaanch lein.")
+    c1, c2 = st.columns([1, 2])
+    if c1.button("🔄 OCR dobara", key=f"{k}_{pcol}_reocr"):
+        st.session_state.pop(sig_key, None)
+        st.rerun()
+    with c2.expander("Photo se padha gaya text"):
+        st.text(text.strip() or "(kuch nahi padha gaya)")
+
+
 def entry_form(db: Supabase, table: str, cols: list[dict]):
     pics = photo_fields(table, cols)
     pic_cols = {f["col"] for f in pics}
@@ -451,26 +557,60 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
     by_name = {c["column_name"]: c for c in fields}
     rules = {r["t_col"]: r for r in calc_rules(table, labels)}
     types = {c["column_name"]: c["data_type"] for c in fields}
-    values = {}
-    grid = st.columns(2)
-    for i, (name, label) in enumerate(ordered):
-        with grid[i % 2]:
-            if name in rules:                      # apne-aap hisaab, bharna nahi
-                r = rules[name]
-                res = run_rule(r, values, types)
-                st.text_input(f"{label} (Auto = {r['desc']})",
-                              value="" if res is None else f"{res:g}", disabled=True,
-                              key=f"{k}_{name}_auto_{res}")
-                if r.get("no_negative") and res is not None and res < 0:
-                    st.caption(f"⚠️ {r['uses'][1]}, {r['uses'][0]} se zyada hai")
-                values[name] = res
-            else:
-                values[name] = input_for(by_name[name], f"{k}_{name}", label)
+    values, uploads = {}, {}                       # uploads: photo column -> photo
 
-    uploads = {}                                   # column -> photo
-    if pics:
+    # OCR wali photo usi ke fields se theek pehle dikhegi
+    by_label = {lbl: col for col, lbl in labels.items()}
+    ocr_groups = {}                                # photo col -> {ocr key: field col}
+    for f in pics:
+        conf = OCR_MAP.get(table, {}).get(f["col"].lower())
+        if conf:
+            tg = {kk: by_label[lbl] for kk, lbl in conf.items() if lbl in by_label}
+            if tg:
+                ocr_groups[f["col"]] = tg
+    order_names = [n for n, _ in ordered]
+    photo_before = {}
+    for pc, tg in ocr_groups.items():
+        first = min(tg.values(), key=order_names.index)
+        photo_before[first] = next(f for f in pics if f["col"] == pc)
+
+    def render_field(name, label):
+        if name in rules:                          # apne-aap hisaab, bharna nahi
+            r = rules[name]
+            res = run_rule(r, values, types)
+            st.text_input(f"{label} (Auto = {r['desc']})",
+                          value="" if res is None else f"{res:g}", disabled=True,
+                          key=f"{k}_{name}_auto_{res}")
+            if r.get("no_negative") and res is not None and res < 0:
+                st.caption(f"⚠️ {r['uses'][1]}, {r['uses'][0]} se zyada hai")
+            values[name] = res
+        else:
+            values[name] = input_for(by_name[name], f"{k}_{name}", label)
+
+    pending = []
+
+    def flush():
+        for i in range(0, len(pending), 2):
+            for colx, (n, l) in zip(st.columns(2), pending[i:i + 2]):
+                with colx:
+                    render_field(n, l)
+        pending.clear()
+
+    for name, label in ordered:
+        if name in photo_before:
+            flush()
+            f = photo_before[name]
+            st.markdown(f"#### 📷 {f['label']}")
+            uploads[f["col"]] = photo_picker(f["label"], f"{k}_{f['col']}")
+            if uploads[f["col"]] is not None:
+                ocr_fill(uploads[f["col"]], ocr_groups[f["col"]], by_name, k, f["col"])
+        pending.append((name, label))
+    flush()
+
+    rest = [f for f in pics if f["col"] not in uploads]
+    if rest:
         st.markdown(f"#### 📷 {PHOTOS.get(table, {}).get('heading', 'Photo')}")
-        for colx, f in zip(st.columns(len(pics)), pics):
+        for colx, f in zip(st.columns(len(rest)), rest):
             with colx:
                 uploads[f["col"]] = photo_picker(f["label"], f"{k}_{f['col']}")
 
