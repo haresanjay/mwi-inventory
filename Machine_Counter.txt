@@ -1,0 +1,12 @@
+Model_in
+Serial_Number_in
+Reading_Date_in
+Counter_No_in
+Total_in
+
+Model_out
+Serial_Number_out
+Reading_Date_out
+Counter_No_out
+Total_out
+
