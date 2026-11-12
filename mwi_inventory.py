@@ -215,6 +215,22 @@ JPEG_QUALITY = 82
 INT_TYPES = {"smallint", "integer", "bigint"}
 NUM_TYPES = {"numeric", "real", "double precision", "money"}
 
+# numeric column hone par bhi in naamon wale fields poore ank (bina .00) mein dikhte hain
+WHOLE_WORDS = ("total", "counter", "count", "page", "gsm", "noof", "qty", "used", "balance",
+               "consumption", "reading")
+DECIMAL_WORDS = ("rim", "ream", "rate", "price", "amount", "weight", "kg")
+
+
+def is_whole(col: dict) -> bool:
+    """Ye field poore ank (1, 2, 101, 2274238) wala hai ya nahi."""
+    dt = col["data_type"]
+    if dt in INT_TYPES:
+        return True
+    if dt in NUM_TYPES:
+        n = norm(col["column_name"])
+        return any(w in n for w in WHOLE_WORDS) and not any(w in n for w in DECIMAL_WORDS)
+    return False
+
 
 def load_settings() -> dict:
     try:
@@ -335,7 +351,7 @@ def input_for(col: dict, key: str, label: str | None = None):
     req = (not col["is_nullable"]) and (not col["has_default"])
     label = (label or pretty(name)) + (" *" if req else "")
 
-    if dt in INT_TYPES:
+    if is_whole(col):
         return st.number_input(label, value=None, step=1, key=key)
     if dt in NUM_TYPES:
         return st.number_input(label, value=None, step=1.0, format="%.2f", key=key)
@@ -377,7 +393,7 @@ def to_db_value(col: dict, value):
         return value.isoformat()
     if isinstance(value, (date, time)):
         return value.isoformat()
-    if dt in INT_TYPES:
+    if is_whole(col):
         return int(value)
     if dt in NUM_TYPES:
         return float(value)
@@ -476,7 +492,7 @@ def set_widget(col: dict, key: str, value):
         else:
             ss[key] = value.strftime("%d-%m-%Y")
         return
-    if dt in INT_TYPES:
+    if is_whole(col):
         try:
             ss[key] = int(re.sub(r"\D", "", str(value)))
         except ValueError:
@@ -716,6 +732,9 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.info("Empty Entry ?")
         return
     df = pd.DataFrame(rows)
+    for c in cols:                         # poore ank bina .00 ke
+        if c["column_name"] in df.columns and is_whole(c):
+            df[c["column_name"]] = pd.to_numeric(df[c["column_name"]], errors="coerce").round().astype("Int64")
     for c in cols:                         # UTC -> India ka samay
         if c["data_type"].startswith("timestamp") and c["column_name"] in df.columns:
             t = pd.to_datetime(df[c["column_name"]], utc=True, errors="coerce")
