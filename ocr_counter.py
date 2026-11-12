@@ -20,6 +20,8 @@ import numpy as np
 import requests
 from PIL import Image, ImageChops, ImageFilter, ImageOps
 
+VERSION = "3.0"          # app mein dikhta hai: kaun-sa OCR version chal raha hai
+
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 

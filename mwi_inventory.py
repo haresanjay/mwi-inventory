@@ -34,7 +34,9 @@ import streamlit as st
 from PIL import Image, ImageOps
 
 try:
+    import importlib
     import ocr_counter                     # Machine Counter photo ka OCR
+    ocr_counter = importlib.reload(ocr_counter)   # GitHub par nayi file aaye to turant wahi chale
 except Exception:                          # file na ho to baaki app chalta rahe
     ocr_counter = None
 
@@ -608,9 +610,12 @@ def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str,
         return
     got = [OCR_NAMES[x] for x in targets if x in data]
     miss = [OCR_NAMES[x] for x in targets if x not in data]
-    msg = f"🔍 OCR ({engine}): {len(got)}/{len(targets)} values bhari gayi"
+    ver = getattr(ocr_counter, "VERSION", "")
+    msg = f"🔍 OCR ({engine}, v{ver or '?'}): {len(got)}/{len(targets)} values bhari gayi"
+    if not ver:
+        st.error("⚠️ ocr_counter.py purani hai – GitHub par nayi ocr_counter.py upload karein.")
     if miss:
-        st.warning("Update Value: " + ", ".join(miss))
+        st.warning("Update Value: " + ", ".join(miss) + f"   (OCR v{ver or '?'})")
     else:
         st.info(msg + ". Save se pehle ek baar jaanch lein.")
     c1, c2 = st.columns([1, 2])
