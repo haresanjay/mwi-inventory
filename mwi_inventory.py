@@ -533,8 +533,7 @@ def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str):
     miss = [OCR_NAMES[x] for x in targets if x not in data]
     msg = f"🔍 OCR ({engine}): {len(got)}/{len(targets)} values bhari gayi"
     if miss:
-        msg += " – nahi mili: " + ", ".join(miss)
-        st.warning(msg + ". Inhe haath se bharein.")
+        st.warning("Update Value: " + ", ".join(miss))
     else:
         st.info(msg + ". Save se pehle ek baar jaanch lein.")
     c1, c2 = st.columns([1, 2])
