@@ -773,7 +773,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     st.subheader(f"🖼️ {conf.get('heading', 'Photo')}")
     show_cols = [c for c in df.columns if c not in pic_cols][:3]
     labels = {i: " | ".join(str(df.at[i, c]) for c in show_cols) for i in df.index}
-    idx = st.selectbox(f"{conf.get('item', 'Entry')} chunein", list(labels),
+    idx = st.selectbox(f"{conf.get('item', 'Entry')} Select & Show", list(labels),
                        format_func=labels.get, key=f"{table}_pick")
 
     state_key = f"{table}_show_img"
