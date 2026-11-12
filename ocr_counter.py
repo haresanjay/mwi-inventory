@@ -16,41 +16,104 @@ import subprocess
 from datetime import date
 
 import requests
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageFilter, ImageOps
 
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 
 
 # ------------------------------------------------------------------ OCR engines
+def _mean(img: Image.Image) -> float:
+    return sum(i * c for i, c in enumerate(img.histogram())) / max(1, img.width * img.height)
+
+
+def _skew_angle(img: Image.Image) -> float:
+    """Tirchhi photo ka angle dhoondhta hai (lines ke projection se)."""
+    small = img.copy()
+    small.thumbnail((700, 700))
+    bw = _flatten(small).point(lambda v: 255 if v < 128 else 0)       # akshar = safed
+    best, best_score = 0.0, -1.0
+    for a10 in range(-120, 121, 5):                                      # -12 se +12 degree
+        a = a10 / 10
+        r = bw.rotate(a, resample=Image.NEAREST, fillcolor=0)
+        w, h = r.size
+        px = r.tobytes()
+        rows = [px[y * w:(y + 1) * w].count(255) for y in range(h)]
+        score = sum((rows[i] - rows[i - 1]) ** 2 for i in range(1, h))
+        if score > best_score:
+            best, best_score = a, score
+    return best
+
+
+def _flatten(img: Image.Image) -> Image.Image:
+    """Chamak (glare) aur asaman roshni hatata hai: har jagah ki background se tulna."""
+    bg = img.filter(ImageFilter.BoxBlur(max(15, img.width // 40)))
+    diff = ImageChops.subtract(bg, img, scale=1, offset=0)              # akshar background se gehre
+    return ImageOps.invert(ImageOps.autocontrast(diff, cutoff=1))
+
+
 def _prepare(image_bytes: bytes) -> list[Image.Image]:
-    """Photo ko OCR ke layak banata hai: seedha, grey, bada, saaf. Andheri screen ho to ulta bhi."""
+    """Photo ko OCR ke layak banata hai: seedha, grey, bada, saaf. Kai roop lautata hai."""
     img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("L")
+    if _mean(img) < 110:                # kaali screen par safed akshar
+        img = ImageOps.invert(img)
     w, h = img.size
     longest = max(w, h)
-    if longest < 1800:
-        f = 1800 / longest
+    if longest < 2000:
+        f = 2000 / longest
         img = img.resize((int(w * f), int(h * f)), Image.LANCZOS)
     elif longest > 3000:
         img.thumbnail((3000, 3000))
-    img = ImageOps.autocontrast(img, cutoff=1).filter(ImageFilter.SHARPEN)
-    out = [img]
-    mean = sum(i * c for i, c in enumerate(img.histogram())) / max(1, img.width * img.height)
-    if mean < 110:                      # kaali screen par safed akshar
-        out.insert(0, ImageOps.invert(img))
-    return out
+    img = img.filter(ImageFilter.MedianFilter(3))                       # LCD ki dhaariyan kam
+    angle = _skew_angle(img)
+    if abs(angle) >= 0.5:
+        img = img.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor=255)
+    flat = _flatten(img)
+    plain = ImageOps.autocontrast(img, cutoff=1).filter(ImageFilter.SHARPEN)
+    binar = flat.point(lambda v: 0 if v < 150 else 255)
+    return [flat, plain, binar]
 
 
 def tesseract_available() -> bool:
     return shutil.which("tesseract") is not None
 
 
-def _tesseract(img: Image.Image, psm: int) -> str:
+def _tesseract(img: Image.Image, psm: int, tsv: bool = False) -> str:
     buf = io.BytesIO()
     img.save(buf, "PNG")
-    r = subprocess.run(["tesseract", "stdin", "stdout", "--psm", str(psm), "-l", "eng"],
-                       input=buf.getvalue(), capture_output=True, timeout=90)
+    cmd = ["tesseract", "stdin", "stdout", "--psm", str(psm), "-l", "eng"] + (["tsv"] if tsv else [])
+    r = subprocess.run(cmd, input=buf.getvalue(), capture_output=True, timeout=90)
     return r.stdout.decode("utf-8", "ignore")
+
+
+def _rows_from_tsv(tsv: str) -> str:
+    """Har shabd ki jagah (x, y) dekh kar ek hi line ke shabd jodta hai,
+    chahe label baayein ho aur number door daayein (jaise '101: Total 1 ....... 2274238')."""
+    words = []
+    for line in tsv.splitlines()[1:]:
+        p = line.split("\t")
+        if len(p) < 12 or not p[11].strip():
+            continue
+        try:
+            x, y, w, h, conf = int(p[6]), int(p[7]), int(p[8]), int(p[9]), float(p[10])
+        except ValueError:
+            continue
+        if conf < 10 or h < 6:
+            continue
+        words.append((y + h / 2, x, h, p[11].strip()))
+    if not words:
+        return ""
+    hs = sorted(w[2] for w in words)
+    tol = max(8, hs[len(hs) // 2] * 0.7)
+    rows = []
+    for cy, x, h, t in sorted(words):
+        if rows and abs(cy - rows[-1][0]) <= tol:
+            rows[-1][1].append((x, t))
+            n = len(rows[-1][1])
+            rows[-1][0] = (rows[-1][0] * (n - 1) + cy) / n
+        else:
+            rows.append([cy, [(x, t)]])
+    return "\n".join(" ".join(t for _, t in sorted(r[1])) for r in rows)
 
 
 def ocr_tesseract(image_bytes: bytes) -> str:
@@ -58,10 +121,14 @@ def ocr_tesseract(image_bytes: bytes) -> str:
         raise RuntimeError("Tesseract install nahi hai (Streamlit Cloud ke liye packages.txt chahiye).")
     texts = []
     for img in _prepare(image_bytes):
-        for psm in (6, 4):
-            texts.append(_tesseract(img, psm))
-        if parse_counter("\n".join(texts)).get("total"):
+        texts.append(_rows_from_tsv(_tesseract(img, 11, tsv=True)))
+        texts.append(_tesseract(img, 6))
+        d = parse_counter("\n".join(texts))
+        if d.get("total") and d.get("_prio", 9) <= 1 and d.get("serial"):
             break
+    for img in _prepare(image_bytes)[:1]:                     # aakhri koshish: alag layout
+        if parse_counter("\n".join(texts)).get("_prio", 9) > 1:
+            texts.append(_rows_from_tsv(_tesseract(img, 4, tsv=True)))
     return "\n".join(texts)
 
 
@@ -111,6 +178,22 @@ NUM = r"(\d{1,3}(?:[,.\s]\d{3})+|\d{4,})"           # 2274238 / 2,274,238 / 2 27
 
 def _num(s: str) -> int:
     return int(re.sub(r"\D", "", s))
+
+
+_DIGIT_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "I": "1", "l": "1", "|": "1",
+                            "i": "1", "!": "1", "Z": "2", "z": "2", "S": "5", "s": "5", "B": "8",
+                            "G": "6", "b": "6", "T": "7", "g": "9", "q": "9"})
+
+
+def _fix_digits(line: str) -> str:
+    """OCR ki aam galti: number ke andar O->0, l->1, S->5 ... (sirf jo shabd zyada-tar ank hon)."""
+    def fix(m):
+        tok = m.group(0)
+        digits = sum(ch.isdigit() for ch in tok)
+        if digits >= 3 and digits >= len(re.sub(r"[,.]", "", tok)) * 0.6:
+            return tok.translate(_DIGIT_FIX)
+        return tok
+    return re.sub(r"[0-9OoDQIl|i!ZzSsBGbTgq,.]{4,}", fix, line)
 
 
 def _clean_value(v: str) -> str:
@@ -197,8 +280,10 @@ def parse_counter(text: str) -> dict:
             break
 
     # ---- Counter no + Total
+    nlines = [_fix_digits(l) for l in lines]
+    serial_digits = re.sub(r"\D", "", out.get("serial", ""))
     cands = []
-    for l in lines:
+    for i, l in enumerate(nlines):
         m = re.search(r"(?i)\b(\d{3})\s*[:;.\-]?\s*tota[l1i|]\b\s*(?:\d{1,2}\b)?\s*[:;.\-]?\s*" + NUM, l)
         if m:
             cands.append((m[1], _num(m[2]), 0))
@@ -212,10 +297,34 @@ def parse_counter(text: str) -> dict:
         m = re.match(r"^\W{0,3}(\d{3})\s*[:;.\-]\D{0,25}?" + NUM + r"\s*$", l)
         if m:
             cands.append((m[1], _num(m[2]), 2))
+            continue
+        # label ek line par, number agli line par
+        m = re.search(r"(?i)\b(101)\b|tota[l1i|]\s*1\b", l)
+        if m and not re.search(NUM, l):
+            for nxt in nlines[i + 1:i + 3]:
+                n2 = re.fullmatch(r"\W*" + NUM + r"\W*", nxt)
+                if n2:
+                    cands.append(("101", _num(n2[1]), 3))
+                    break
+    if not cands:                                # aakhri upaay: sabse bada counter jaisa number
+        nums = []
+        for l in nlines:
+            if _dates_in(l) or re.search(r"(?i)serial|s/n|\d{1,2}:\d{2}", l):
+                continue
+            for n in re.findall(NUM, l):
+                v = _num(n)
+                if 1000 <= v < 10**9 and str(v) != serial_digits and not re.fullmatch(r"20\d{6}", str(v)):
+                    nums.append(v)
+        if nums:
+            cands.append((None, max(nums), 4))
     if cands:
-        cands.sort(key=lambda c: (c[0] != "101", c[2]))   # 101 (Total 1) sabse pehle
-        code, total, _ = cands[0]
+        def rank(c):                             # 101 > bina code wali Total line > baaki code > andaza
+            code, _, prio = c
+            group = 0 if code == "101" else 1 if (code is None and prio < 4) else 2 if code else 3
+            return (group, prio)
+        cands.sort(key=rank)
+        code, total, prio = cands[0]
         out["total"] = total
-        if code:
-            out["counter"] = code
+        out["counter"] = code or "101"           # Canon: Total 1 = counter 101
+        out["_prio"] = prio
     return out
