@@ -518,28 +518,93 @@ def set_widget(col: dict, key: str, value):
         ss[key] = str(value)
 
 
-def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str):
-    """Nayi photo aane par OCR karke us group ke fields bharta hai."""
+def machine_from_filename(name: str) -> str:
+    """Photo ki file ke naam se Machine No:  M1.jpg -> M1,  M12 (2).jpeg -> M12,  Counter_M3.png -> M3"""
+    stem = Path(str(name or "")).stem
+    m = re.search(r"(?i)(?:^|[^a-z0-9])m\s*[-_ ]?\s*(\d{1,3})(?=$|[^0-9])", stem)
+    return f"M{int(m[1])}" if m else ""
+
+
+def lookup_by_serial(db, table: str, labels: dict, order_col: str, serial: str) -> dict:
+    """Isi Serial Number wali pichhli entry se Machine No aur Model nikalta hai."""
+    by_label = {lbl: col for col, lbl in labels.items()}
+    scols = [c for c in (by_label.get("Serial Number (IN)"), by_label.get("Serial Number (OUT)")) if c]
+    mcol = by_label.get("Machine No")
+    if not db or not scols or not mcol or not serial:
+        return {}
+    flt = ",".join(f'{c}.eq."{serial}"' for c in scols)
+    try:
+        rows = db.select(table, {"select": "*", "or": f"({flt})", "order": f"{order_col}.desc",
+                                 "limit": 20})
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        if not out.get("machine") and r.get(mcol):
+            out["machine"] = str(r[mcol])
+        for lbl in ("Model (IN)", "Model (OUT)"):
+            c = by_label.get(lbl)
+            if not out.get("model") and c and r.get(c):
+                out["model"] = str(r[c])
+    return out
+
+
+def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str,
+             db=None, table: str = "", labels: dict | None = None, order_col: str = "id"):
+    """Nayi photo aane par OCR karke us group ke fields bharta hai.
+    Machine No: 1) photo ki file ke naam se (M1.jpg -> M1)  2) photo mein likha ho to
+                3) warna isi Serial Number ki pichhli entry se."""
+    labels = labels or {}
     sig_key, res_key = f"{k}_{pcol}_ocrsig", f"{k}_{pcol}_ocrres"
     sig = (getattr(photo, "file_id", None) or getattr(photo, "name", ""), getattr(photo, "size", 0))
     if st.session_state.get(sig_key) != sig:
+        fname_machine = machine_from_filename(getattr(photo, "name", ""))
         if ocr_counter is None:
-            st.session_state[res_key] = ({}, "", "", "ocr_counter.py file nahi mili")
+            st.session_state[res_key] = ({"machine": fname_machine,
+                                          "_machine_src": "file ke naam se"} if fname_machine else {},
+                                         "", "", "ocr_counter.py file nahi mili")
         else:
             with st.spinner("🔍 Photo padh raha hai (OCR)... Pls Wait"):
                 try:
                     data, text, engine = ocr_counter.read_photo(photo.getvalue(), ocr_key())
+                    data = dict(data)
+                    # Serial Number se pichhli entry: Machine No (aur Model agar photo mein na ho)
+                    past = lookup_by_serial(db, table, labels, order_col, data.get("serial", ""))
+                    if "model" not in data and past.get("model"):
+                        data["model"] = past["model"]
+                    src = ""
+                    if fname_machine:
+                        data["machine"], src = fname_machine, "file ke naam se"
+                    elif data.get("machine"):
+                        src = "photo se"
+                    elif past.get("machine"):
+                        data["machine"], src = past["machine"], "isi Serial ki pichhli entry se"
+                    data["_machine_src"] = src
                     for kk, col in targets.items():
                         if kk in data:
                             set_widget(by_name[col], f"{k}_{col}", data[kk])
                     st.session_state[res_key] = (data, text, engine, "")
                 except Exception as e:
-                    st.session_state[res_key] = ({}, "", "", str(e))
+                    st.session_state[res_key] = ({"machine": fname_machine,
+                                                  "_machine_src": "file ke naam se"}
+                                                 if fname_machine else {}, "", "", str(e))
+        data0 = st.session_state[res_key][0]
+        mcol = {lbl: c for c, lbl in labels.items()}.get("Machine No")
+        if data0.get("machine") and mcol:
+            cur = st.session_state.get(f"{k}_{mcol}")
+            # file ke naam wala Machine No hamesha lagao; baaki tabhi jab box khaali ho
+            if not cur or (data0.get("_machine_src") == "file ke naam se" and cur != data0["machine"]):
+                # Machine No ka box photo se pehle ban chuka hai: agli baar (rerun) bharenge
+                st.session_state[f"{k}_pending"] = {mcol: data0["machine"]}
         st.session_state[sig_key] = sig
+        if st.session_state.get(f"{k}_pending"):
+            st.rerun()
 
     data, text, engine, err = st.session_state.get(res_key, ({}, "", "", ""))
     if err:
         st.warning(f"OCR nahi ho saka: {err}. Values haath se bharein.")
+        if data.get("machine"):
+            st.caption(f"🏷️ Machine No: **{data['machine']}** ({data.get('_machine_src', '')})")
         return
     got = [OCR_NAMES[x] for x in targets if x in data]
     miss = [OCR_NAMES[x] for x in targets if x not in data]
@@ -554,6 +619,12 @@ def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str):
         st.rerun()
     with c2.expander("Photo se padha gaya text"):
         st.text(text.strip() or "(kuch nahi padha gaya)")
+    if "Machine No" in labels.values():
+        if data.get("machine"):
+            st.caption(f"🏷️ Machine No: **{data['machine']}** ({data.get('_machine_src', '')})")
+        elif data.get("serial"):
+            st.caption(f"🏷️ Serial **{data['serial']}** ki pehli entry hai – Machine No haath se "
+                       "bharein, agli baar apne-aap aayega.")
 
 
 def entry_form(db: Supabase, table: str, cols: list[dict]):
@@ -565,6 +636,14 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
     ver_key = f"{table}_ver"
     ver = st.session_state.setdefault(ver_key, 0)
     k = f"{table}_v{ver}"
+
+    # OCR se mila Machine No (box banne se pehle bharna zaroori hai)
+    pend = st.session_state.pop(f"{k}_pending", None)
+    if pend:
+        meta = {c["column_name"]: c for c in cols}
+        for col, v in pend.items():
+            if col in meta:
+                set_widget(meta[col], f"{k}_{col}", v)
 
     done = st.session_state.pop(f"{table}_done", None)
     if done is not None:
@@ -630,7 +709,8 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
             st.markdown(f"#### 📷 {f['label']}")
             uploads[f["col"]] = photo_picker(f["label"], f"{k}_{f['col']}")
             if uploads[f["col"]] is not None:
-                ocr_fill(uploads[f["col"]], ocr_groups[f["col"]], by_name, k, f["col"])
+                ocr_fill(uploads[f["col"]], ocr_groups[f["col"]], by_name, k, f["col"],
+                         db, table, labels, cols[0]["column_name"])
         pending.append((name, label))
     flush()
 
