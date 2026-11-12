@@ -13,6 +13,8 @@ import io
 import re
 import shutil
 import subprocess
+import tempfile
+import os
 from collections import Counter
 from datetime import date
 
@@ -20,7 +22,7 @@ import numpy as np
 import requests
 from PIL import Image, ImageChops, ImageFilter, ImageOps
 
-VERSION = "3.2"          # app mein dikhta hai: kaun-sa OCR version chal raha hai
+VERSION = "4.0"          # app mein dikhta hai: kaun-sa OCR version chal raha hai
 
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -114,9 +116,24 @@ def _tesseract(img: Image.Image, psm: int, tsv: bool = False) -> str:
     return r.stdout.decode("utf-8", "ignore")
 
 
-def _rows_from_tsv(tsv: str) -> str:
-    """Har shabd ki jagah (x, y) dekh kar ek hi line ke shabd jodta hai,
-    chahe label baayein ho aur number door daayein (jaise '101: Total 1 ....... 2274238')."""
+def _tesseract_both(img: Image.Image, psm: int) -> tuple[str, str]:
+    """Ek hi baar mein Tesseract se (seedha text, TSV shabd-jagah) dono."""
+    with tempfile.TemporaryDirectory() as d:
+        src, out = os.path.join(d, "in.png"), os.path.join(d, "out")
+        img.save(src, "PNG")
+        subprocess.run(["tesseract", src, out, "--psm", str(psm), "-l", "eng", "txt", "tsv"],
+                       capture_output=True, timeout=90)
+        def rd(ext):
+            try:
+                with open(out + ext, encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+            except OSError:
+                return ""
+        return rd(".txt"), rd(".tsv")
+
+
+def _tsv_words(tsv: str) -> list[dict]:
+    """Tesseract TSV se har shabd aur uski jagah (x, y, chaudai, oonchai)."""
     words = []
     for line in tsv.splitlines()[1:]:
         p = line.split("\t")
@@ -128,26 +145,82 @@ def _rows_from_tsv(tsv: str) -> str:
             continue
         if conf < 10 or h < 6:
             continue
-        words.append((y + h / 2, x, h, p[11].strip()))
+        words.append({"x": x, "y": y, "w": w, "h": h, "cx": x + w / 2, "cy": y + h / 2,
+                      "t": p[11].strip()})
+    return words
+
+
+def _rows_from_words(words: list[dict]) -> str:
+    """Har shabd ki jagah (x, y) dekh kar ek hi line ke shabd jodta hai,
+    chahe label baayein ho aur number door daayein (jaise '101: Total 1 ....... 2274238')."""
     if not words:
         return ""
-    hs = sorted(w[2] for w in words)
+    hs = sorted(w["h"] for w in words)
     tol = max(8, hs[len(hs) // 2] * 0.7)
     rows = []
-    for cy, x, h, t in sorted(words):
-        if rows and abs(cy - rows[-1][0]) <= tol:
-            rows[-1][1].append((x, t))
+    for wd in sorted(words, key=lambda d: d["cy"]):
+        if rows and abs(wd["cy"] - rows[-1][0]) <= tol:
+            rows[-1][1].append((wd["x"], wd["t"]))
             n = len(rows[-1][1])
-            rows[-1][0] = (rows[-1][0] * (n - 1) + cy) / n
+            rows[-1][0] = (rows[-1][0] * (n - 1) + wd["cy"]) / n
         else:
-            rows.append([cy, [(x, t)]])
+            rows.append([wd["cy"], [(wd["x"], wd["t"])]])
     return "\n".join(" ".join(t for _, t in sorted(r[1])) for r in rows)
+
+
+def _rows_from_tsv(tsv: str) -> str:
+    return _rows_from_words(_tsv_words(tsv))
+
+
+def _as_number(text: str):
+    """Shabd number hai to int, warna None  ('_3785925_' -> 3785925, '3228422]' -> 3228422)."""
+    t = _fix_digits(text.strip("_|[](){}.,:;'\"`~-=+ "))
+    t = re.sub(r"[,.\s]", "", t)
+    if not t or not re.fullmatch(r"\d+", t):
+        return None
+    return int(t)
+
+
+def count_first_row(words: list[dict]):
+    """Upar wali table ke 'Count' heading ke theek NEECHE pehli row ka number.
+    Agar pehli row ka number padha hi nahi gaya to None (doosri row kabhi nahi lete)."""
+    heads = [w for w in words if re.sub(r"[^a-z0]", "", w["t"].lower()) in
+             ("count", "c0unt", "coun", "couni", "counf")]
+    if not heads:
+        return None
+    hs = sorted(w["h"] for w in words)
+    hmed = hs[len(hs) // 2]
+    for head in sorted(heads, key=lambda w: w["cy"]):
+        same_row = [w for w in words if abs(w["cy"] - head["cy"]) <= hmed * 0.9]
+        if any(re.search(r"(?i)send", w["t"]) for w in same_row):
+            return None                              # neeche wali "Send Counter" table - nahi chahiye
+        col = []
+        for w in words:
+            if w["cy"] <= head["cy"] + head["h"] * 0.5:
+                continue
+            if w["x"] + w["w"] < head["cx"] or w["x"] < head["x"] - 2.5 * head["w"]:
+                continue                             # Count column ke bahar
+            v = _as_number(w["t"])
+            if v is not None:
+                col.append((w["cy"], v))
+        if not col:
+            return None
+        col.sort()
+        first_cy, first_v = col[0]
+        gaps = [b[0] - a[0] for a, b in zip(col[:5], col[1:5]) if b[0] - a[0] > hmed]
+        row_h = sorted(gaps)[len(gaps) // 2] if gaps else None
+        gap = first_cy - head["cy"]
+        if (row_h and gap > row_h * 1.6) or (not row_h and gap > hmed * 2.8):
+            return None                              # pehli row chhoot gayi - andaza nahi lagayenge
+        return first_v
+    return None
 
 
 def _vote(results: list[dict]) -> dict:
     """Kai baar padhne ke nateejon mein se har value ka bahumat (sabse zyada baar aayi value)."""
     out = {}
-    good = [r for r in results if r.get("counter") == "101" and r.get("_prio", 9) <= 1]
+    good = ([r for r in results if r.get("_sure")]
+            or [r for r in results if r.get("counter") == "101" and r.get("_prio", 9) <= 1])
     for key in ("model", "serial", "date", "counter", "total", "machine"):
         pool = good if key == "total" and good else results
         vals = [r[key] for r in pool if r.get(key) is not None]
@@ -157,20 +230,40 @@ def _vote(results: list[dict]) -> dict:
 
 
 def ocr_tesseract(image_bytes: bytes) -> tuple[str, dict]:
-    """Photo ko 3 roop x 2 tareeke se padhta hai; (poora text, bahumat wali values) lautata hai."""
+    """Photo ko 3 roop x 2 tareeke se padhta hai; (poora text, bahumat wali values) lautata hai.
+    Total = 'Count' heading ke neeche pehli row (sabse pehle yahi niyam)."""
     if not tesseract_available():
         raise RuntimeError("Tesseract install nahi hai (Streamlit Cloud ke liye packages.txt chahiye).")
-    texts, results = [], []
+    texts, results, firsts = [], [], []
     for img in _prepare(image_bytes):
-        for t in (_rows_from_tsv(_tesseract(img, 11, tsv=True)), _tesseract(img, 6)):
-            texts.append(t)
-            results.append(parse_counter(t))
-    if not any(r.get("total") for r in results):                # aakhri koshish: alag layout
+        for psm in (11, 6):
+            plain, tsv = _tesseract_both(img, psm)
+            words = _tsv_words(tsv)
+            t = _rows_from_words(words)
+            # psm 11: shabd-jagah se bani lines;  psm 6: Tesseract ka seedha text (dono kaam ke)
+            for txt in ((t,) if psm == 11 else (plain, t)):
+                texts.append(txt)
+                results.append(parse_counter(txt))
+            v = count_first_row(words)
+            if v is not None:
+                firsts.append(v)
+    if not firsts and not any(r.get("total") for r in results):   # aakhri koshish: alag layout
         img = _prepare(image_bytes)[0]
-        t = _rows_from_tsv(_tesseract(img, 4, tsv=True))
+        words = _tsv_words(_tesseract(img, 4, tsv=True))
+        t = _rows_from_words(words)
         texts.append(t)
         results.append(parse_counter(t))
+        v = count_first_row(words)
+        if v is not None:
+            firsts.append(v)
     data = _vote(results)
+    if firsts:                                   # Count ke neeche pehli row = Total
+        ranked = Counter(firsts).most_common()
+        top = [v for v, n in ranked if n == ranked[0][1]]
+        text_totals = [r.get("total") for r in results]
+        best = max(top, key=lambda v: (text_totals.count(v), v >= 1000))
+        data["total"], data["counter"] = best, "101"
+        data["_total_src"] = "count"             # pakka: Count ke neeche pehli row
     if not data.get("total"):                                    # sab mila kar ek baar aur
         whole = parse_counter("\n".join(texts))
         data = {**whole, **data}
@@ -329,7 +422,7 @@ def parse_counter(text: str) -> dict:
     # Bahut kata hua "al Number KZT00864" (Serial ka bas aakhri hissa bacha)
     if "serial" not in out:
         for l in lines:
-            m = re.search(r"(?i)(?:\b(?:ial|al|l)\s*(?:number|no\.?)|\b[nu]?u?mber|\bunber)\s*[:=\-.]?\s*"
+            m = re.search(r"(?i)(?:\b(?:ial|al|[l1I|])\s*(?:number|no\.?)|\b[nu]?u?mber|\bunber)\W{0,4}"
                           r"([A-Z]{1,4}[A-Z0-9]*\d{3,}[A-Z0-9]*)\b", l)
             if m and not re.search(r"(?i)total|counter|page", l):
                 sr = m[1].upper()
@@ -374,6 +467,9 @@ def parse_counter(text: str) -> dict:
         m = re.match(r"(?i)^\W*(?:\d{0,2}\s*)?(?:to|o)?ta[l1i|]\s*[1lIi|]\b(?!\s*\))\W{0,3}" + NUM, l)
         if m:
             cands.append(("101", _num(m[1]), 1))
+            continue
+        # "Total (Large)", "Copy (Total 1)", "Scan (Total 1)" ... ye Total 1 nahi hain
+        if re.search(r"(?i)\(\s*tota|tota[l1i|]\s*\(|large|copy|scan|black|colou?r|send|print\s*\(", l):
             continue
         if re.search(r"(?i)tota[l1i|]", l):
             nums = re.findall(NUM, l)
@@ -421,4 +517,5 @@ def parse_counter(text: str) -> dict:
         out["total"] = total
         out["counter"] = code or "101"           # Canon: Total 1 = counter 101
         out["_prio"] = prio
+        out["_sure"] = code == "101" and prio <= 1   # pakki "101 / Total 1" wali line se mila
     return out

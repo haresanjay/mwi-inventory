@@ -652,8 +652,14 @@ def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str,
         st.error("⚠️ ocr_counter.py purani hai – GitHub par nayi ocr_counter.py upload karein.")
     if miss:
         st.warning("Update Value: " + ", ".join(miss) + f"   (OCR v{ver or '?'})")
+    elif data.get("_total_src") == "count":
+        st.success(f"✔ Total = {data['total']} (Count ke neeche pehli row)   ·   "
+                   f"{len(got)}/{len(targets)} values bhari gayi (OCR v{ver})")
     else:
         st.info(msg + ". Save se pehle ek baar jaanch lein.")
+    if "total" in data and data.get("_total_src") != "count" and "total" in targets:
+        st.warning("⚠️ Count ke neeche pehli row saaf nahi padhi gayi – Total ek baar report se "
+                   "mila lein.")
     c1, c2 = st.columns([1, 2])
     if c1.button("🔄 OCR dobara", key=f"{k}_{pcol}_reocr"):
         st.session_state.pop(sig_key, None)
