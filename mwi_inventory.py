@@ -308,6 +308,12 @@ class Supabase:
         return self._check(requests.get(self.base + table, headers=self.h,
                                         params=params, timeout=20))
 
+    def update(self, table: str, id_col: str, id_val, row: dict):
+        """Ek entry (id se) badalta hai. Badli hui rows lautata hai ([] = permission nahi/entry nahi)."""
+        h = {**self.h, "Prefer": "return=representation"}
+        return self._check(requests.patch(self.base + table, headers=h,
+                                          params={id_col: f"eq.{id_val}"}, json=row, timeout=20))
+
     def insert(self, table: str, row: dict):
         h = {**self.h, "Prefer": "return=minimal"}
         return self._check(requests.post(self.base + table, headers=h,
@@ -920,6 +926,8 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         if colx.button(f["button"], use_container_width=True, key=f"{table}_b{n}"):
             st.session_state[state_key] = (idx, f["col"])
 
+    photo_update_box(db, table, cols, df, idx, pics)
+
     chosen = st.session_state.get(state_key)
     if not chosen or chosen[0] != idx:
         return
@@ -938,6 +946,45 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.image(src, caption=title, use_container_width=True)
         if src.startswith("http"):
             st.markdown(f"[🔗 Photo poore size mein kholein]({src})")
+
+
+def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict]):
+    """Chuni hui entry mein photo jodna / badalna (ek-ek karke)."""
+    id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
+    msg_key = f"{table}_photo_upd_msg"
+    msg = st.session_state.pop(msg_key, None)
+    if msg:
+        (st.success if msg[0] == "ok" else st.error)(msg[1])
+    if not id_col or id_col not in df.columns:
+        return
+    row_id = df.at[idx, id_col]
+    with st.expander("📷 Photo Update – is entry mein photo jodein / badlein"):
+        names = {f["col"]: f["label"] for f in pics}
+        # Machine Counter mein OUT photo pehle se chuni rahe
+        default = next((i for i, f in enumerate(pics) if "out" in f["col"].lower()), 0)
+        pcol = st.radio("Kaun-si photo?", list(names), index=default, format_func=names.get,
+                        horizontal=True, key=f"{table}_pu_col")
+        f = next(x for x in pics if x["col"] == pcol)
+        cur = image_src(db, df.at[idx, pcol]) if pcol in df.columns else None
+        if cur:
+            st.image(cur, caption="Abhi wali photo (nayi daalne par badal jayegi)", width=200)
+        ver = st.session_state.get(f"{table}_pu_ver", 0)
+        up = photo_picker(f["label"], f"{table}_pu_{ver}")
+        if st.button("💾 Save Photo", type="primary", disabled=up is None,
+                     use_container_width=True, key=f"{table}_pu_save_{ver}"):
+            try:
+                with st.spinner("Photo save ho rahi hai... Pls Wait"):
+                    url = save_image(db, up, f["folder"])
+                    done = db.update(table, id_col, int(row_id), {pcol: url})
+                if done:
+                    st.session_state[msg_key] = ("ok", f"✔ Photo Saved – entry id {row_id}")
+                    st.session_state[f"{table}_pu_ver"] = ver + 1      # box khaali
+                else:
+                    st.session_state[msg_key] = ("err", "Photo upload hui par entry update nahi hui – "
+                                                 "Supabase mein 'photo_update_permission.sql' chalayein.")
+            except Exception as e:
+                st.session_state[msg_key] = ("err", f"❌ Photo save nahi hui: {e}")
+            st.rerun()
 
 
 # ------------------------------------------------------------------ app
