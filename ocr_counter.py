@@ -85,12 +85,11 @@ def _prepare(image_bytes: bytes) -> list[Image.Image]:
     if _mean(img) < 110:                # kaali screen par safed akshar
         img = ImageOps.invert(img)
     w, h = img.size
-    longest = max(w, h)
-    if longest < 2000:
-        f = 2000 / longest
+    # lambi (portrait) photo mein akshar chhote hote hain: chaudai ke hisaab se bhi bada karo
+    f = max(2000 / max(w, h), 1600 / min(w, h))
+    f = min(f, 3200 / max(w, h))
+    if abs(f - 1) > 0.05:
         img = img.resize((int(w * f), int(h * f)), Image.LANCZOS)
-    elif longest > 3000:
-        img.thumbnail((3000, 3000))
     img = img.filter(ImageFilter.MedianFilter(3))                       # LCD ki dhaariyan kam
     angle = _skew_angle(img)
     if abs(angle) >= 0.5:
@@ -147,7 +146,7 @@ def _vote(results: list[dict]) -> dict:
     """Kai baar padhne ke nateejon mein se har value ka bahumat (sabse zyada baar aayi value)."""
     out = {}
     good = [r for r in results if r.get("counter") == "101" and r.get("_prio", 9) <= 1]
-    for key in ("model", "serial", "date", "counter", "total"):
+    for key in ("model", "serial", "date", "counter", "total", "machine"):
         pool = good if key == "total" and good else results
         vals = [r[key] for r in pool if r.get(key) is not None]
         if vals:
@@ -217,7 +216,8 @@ def read_photo(image_bytes: bytes, ocr_space_key: str = "") -> tuple[dict, str, 
 
 
 # ------------------------------------------------------------------ text se values
-NUM = r"(\d{1,3}(?:[,.\s]\d{3})+|\d{4,})"           # 2274238 / 2,274,238 / 2 274 238
+# 2274238 / 2,274,238 / 2 274 238   ("Total 1 3281548" ko "1 328" nahi samjhega)
+NUM = r"(\d{1,3}(?:,\d{3})+(?!\d)|\d{1,3}(?:\s\d{3})+(?![\d,])|\d{4,})"
 
 
 def _num(s: str) -> int:
@@ -311,12 +311,25 @@ def parse_counter(text: str) -> dict:
 
     # ---- Serial number
     for l in lines:
-        m = re.search(r"(?i)(?:serial\s*(?:no\.?|number|num|#)?|s\s*/\s*n|sr\.?\s*no\.?|"
+        m = re.search(r"(?i)(?:serial\s*(?:no\.?|number|num|#)?|(?:e?rial|ial)\s*(?:no\.?|number|num)|"
+                      r"s\s*/\s*n|sr\.?\s*no\.?|"
                       r"machine\s*(?:id|no\.?|serial))\s*[:=\-.]?\s*([A-Z0-9][A-Z0-9\-]{3,})", l)
         if m and re.search(r"\d", m[1]):
             sr = m[1].upper().strip("-")
-            sr = re.sub(r"O(?=\d)|(?<=\d)O", "0", sr)        # YCPO1400 -> YCP01400
+            # aakhri ank wala hissa: O->0, I/L->1   (YCPOI400 -> YCP01400)
+            mm = re.search(r"[0-9OIL]{3,}$", sr)
+            if mm and re.search(r"\d", mm[0]):
+                sr = sr[:mm.start()] + mm[0].translate(str.maketrans("OIL", "011"))
             out["serial"] = sr
+            break
+
+    # ---- Machine No (jaise M-1, haath se likha ho to OCR.space se mil sakta hai)
+    for l in lines:
+        m = (re.search(r"(?i)(?:machine\s*no\.?|m\s*/?\s*c\s*no\.?)\s*[:=\-.]?\s*"
+                       r"([A-Z]{1,3})\s*[-–~_.]?\s*([0-9Il|]{1,3})\b", l)
+             or re.fullmatch(r"\W*([Mm])\s*[-–~_.]\s*([0-9Il|]{1,3})\W*", l))
+        if m:
+            out["machine"] = f"{m[1].upper()}{int(m[2].translate(str.maketrans('Il|', '111')))}"
             break
 
     # ---- Reading date ("date" wali line ko pehle dekho)
@@ -340,7 +353,11 @@ def parse_counter(text: str) -> dict:
             nums = re.findall(NUM, l)
             if nums:
                 code = re.match(r"^\W*(\d{3})\b", l)
-                cands.append((code[1] if code else None, max(_num(n) for n in nums), 1))
+                code = code[1] if code else None
+                # "01 Total 1 ..." (baayan hissa kata) = 101;  "(Total 1)" wali lines nahi
+                if not code and re.search(r"(?i)(?<!\()\btota[l1i|]\s*[1lI|]\b(?!\s*\))", l):
+                    code = "101"
+                cands.append((code, max(_num(n) for n in nums), 1))
                 continue
         m = re.match(r"^\W{0,3}(\d{3})\s*[:;.\-]\D{0,25}?" + NUM + r"\s*$", l)
         if m:
