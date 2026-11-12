@@ -20,7 +20,7 @@ import numpy as np
 import requests
 from PIL import Image, ImageChops, ImageFilter, ImageOps
 
-VERSION = "3.0"          # app mein dikhta hai: kaun-sa OCR version chal raha hai
+VERSION = "3.2"          # app mein dikhta hai: kaun-sa OCR version chal raha hai
 
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -239,7 +239,8 @@ def _fix_digits(line: str) -> str:
         if digits >= 3 and digits >= len(re.sub(r"[,.]", "", tok)) * 0.6:
             return tok.translate(_DIGIT_FIX)
         return tok
-    return re.sub(r"[0-9OoDQIl|i!ZzSsBGbTgq,.]{4,}", fix, line)
+    # akshar se jude shabd (jaise Serial KZT00864) ko kabhi ank mein nahi badalte
+    return re.sub(r"(?<![A-Za-z])[0-9OoDQIl|i!ZzSsBGbTgq,.]{4,}(?![A-Za-z])", fix, line)
 
 
 def _clean_value(v: str) -> str:
@@ -291,7 +292,7 @@ BRAND_MODEL = re.compile(
 
 def parse_counter(text: str) -> dict:
     """OCR text se model, serial, date, counter, total nikalta hai (jo mile)."""
-    lines = [re.sub(r"[ \t]+", " ", l).strip() for l in text.splitlines()]
+    lines = [re.sub(r"[ \t_]+", " ", l).strip() for l in text.splitlines()]   # "_" = pen ki underline
     lines = [l for l in lines if l]
     out: dict = {}
 
@@ -325,6 +326,24 @@ def parse_counter(text: str) -> dict:
             out["serial"] = sr
             break
 
+    # Bahut kata hua "al Number KZT00864" (Serial ka bas aakhri hissa bacha)
+    if "serial" not in out:
+        for l in lines:
+            m = re.search(r"(?i)(?:\b(?:ial|al|l)\s*(?:number|no\.?)|\b[nu]?u?mber|\bunber)\s*[:=\-.]?\s*"
+                          r"([A-Z]{1,4}[A-Z0-9]*\d{3,}[A-Z0-9]*)\b", l)
+            if m and not re.search(r"(?i)total|counter|page", l):
+                sr = m[1].upper()
+                mm = re.search(r"[0-9OIL]{3,}$", sr)
+                if mm and re.search(r"\d", mm[0]):
+                    sr = sr[:mm.start()] + mm[0].translate(str.maketrans("OIL", "011"))
+                out["serial"] = sr
+                break
+
+    # Canon serial = 3 akshar + 5 ank (KZT00864). OCR ne beech ka akshar ank padh liya ho: K2T -> KZT
+    sr = out.get("serial", "")
+    if re.fullmatch(r"[A-Z][0-9][A-Z]\d{5}", sr):
+        out["serial"] = sr[0] + sr[1].translate(str.maketrans("201586", "ZOISBG")) + sr[2:]
+
     # ---- Machine No (jaise M-1, haath se likha ho to OCR.space se mil sakta hai)
     for l in lines:
         m = (re.search(r"(?i)(?:machine\s*no\.?|m\s*/?\s*c\s*no\.?)\s*[:=\-.]?\s*"
@@ -350,6 +369,11 @@ def parse_counter(text: str) -> dict:
         m = re.search(r"(?i)\b(\d{3})\s*[:;.\-]?\s*tota[l1i|]\b\s*(?:\d{1,2}\b)?\s*[:;.\-]?\s*" + NUM, l)
         if m:
             cands.append((m[1], _num(m[2]), 0))
+            continue
+        # bahut kata hua "tal 1 2368410" (Total 1 ka aakhri hissa) = 101
+        m = re.match(r"(?i)^\W*(?:\d{0,2}\s*)?(?:to|o)?ta[l1i|]\s*[1lIi|]\b(?!\s*\))\W{0,3}" + NUM, l)
+        if m:
+            cands.append(("101", _num(m[1]), 1))
             continue
         if re.search(r"(?i)tota[l1i|]", l):
             nums = re.findall(NUM, l)
@@ -379,8 +403,10 @@ def parse_counter(text: str) -> dict:
             if _dates_in(l) or re.search(r"(?i)serial|s/n|model|device|product|i[Rr][- ]?adv|"
                                          r"date|\d{1,2}:\d{2}", l):
                 continue
-            for n in re.findall(NUM, l):
-                v = _num(n)
+            for mt in re.finditer(NUM, l):
+                if mt.start() and l[mt.start() - 1].isalpha():      # KZT00864 jaisa shabd
+                    continue
+                v = _num(mt[1])
                 if 1000 <= v < 10**9 and str(v) != serial_digits and not re.fullmatch(r"20\d{6}", str(v)):
                     nums.append(v)
         if nums:

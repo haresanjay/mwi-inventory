@@ -527,6 +527,39 @@ def machine_from_filename(name: str) -> str:
     return f"M{int(m[1])}" if m else ""
 
 
+_LOOKALIKE = str.maketrans("Z2O0QDI1LS5B8G6", "220000111558866")
+
+
+def _one_extra(ocr: str, known: str) -> bool:
+    """OCR ne ek faltu akshar jod diya ho (KZ2T00864 vs KZT00864).
+    Ank badalne wala farq (XRW01235 vs XRW01234) NAHI maana jaata - wo alag machine ho sakti hai."""
+    if len(ocr) != len(known) + 1:
+        return False
+    a, b = ocr.translate(_LOOKALIKE), known.translate(_LOOKALIKE)
+    return any(a[:i] + a[i + 1:] == b for i in range(len(a)))
+
+
+def fix_serial(db, table: str, labels: dict, serial: str) -> str:
+    """OCR wale Serial ko pehle se save Serial Numbers se milata hai (K2T00864 -> KZT00864)."""
+    by_label = {lbl: col for col, lbl in labels.items()}
+    scols = [c for c in (by_label.get("Serial Number (IN)"), by_label.get("Serial Number (OUT)")) if c]
+    if not db or not scols or not serial:
+        return serial
+    try:
+        rows = db.select(table, {"select": ",".join(scols), "limit": 2000})
+    except Exception:
+        return serial
+    known = {str(r[c]).strip().upper() for r in rows for c in scols if r.get(c)}
+    s0 = serial.upper()
+    if s0 in known:
+        return s0
+    alike = [k for k in known if k.translate(_LOOKALIKE) == s0.translate(_LOOKALIKE)]
+    if len(alike) == 1:
+        return alike[0]
+    near = [k for k in known if len(k) >= 6 and _one_extra(s0, k)]
+    return near[0] if len(near) == 1 else serial
+
+
 def lookup_by_serial(db, table: str, labels: dict, order_col: str, serial: str) -> dict:
     """Isi Serial Number wali pichhli entry se Machine No aur Model nikalta hai."""
     by_label = {lbl: col for col, lbl in labels.items()}
@@ -570,6 +603,9 @@ def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str,
                 try:
                     data, text, engine = ocr_counter.read_photo(photo.getvalue(), ocr_key())
                     data = dict(data)
+                    # Serial ko pehle se save Serials se milao (OCR ki Z/2, O/0 galti)
+                    if data.get("serial"):
+                        data["serial"] = fix_serial(db, table, labels, data["serial"])
                     # Serial Number se pichhli entry: Machine No (aur Model agar photo mein na ho)
                     past = lookup_by_serial(db, table, labels, order_col, data.get("serial", ""))
                     if "model" not in data and past.get("model"):
