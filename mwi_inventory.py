@@ -905,7 +905,27 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     for f in pics:
         view[f["col"]] = view[f["col"]].map(lambda v: image_src(db, v))
         cfg[f["col"]] = st.column_config.ImageColumn(f["label"], width="small")
-    st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg)
+    grid_kw = {}
+    if pics:
+        st.caption("👆 Kisi bhi row par click karke chunein – neeche us entry ki photo dekh / "
+                   "jod / badal sakte hain")
+        grid_kw = dict(on_select="rerun", selection_mode="single-row", key=f"{table}_grid")
+    try:
+        ev = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg, **grid_kw)
+    except TypeError:                                  # purana Streamlit: row chunna nahi
+        ev = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg)
+    picked_from_grid = False
+    try:
+        sel_rows = list(ev.selection.rows)
+    except Exception:
+        sel_rows = []
+    if sel_rows and 0 <= sel_rows[0] < len(df):
+        gi = df.index[sel_rows[0]]
+        last_key = f"{table}_grid_last"
+        if st.session_state.get(last_key) != gi:       # nayi row chuni: neeche wala box bhi wahi
+            st.session_state[last_key] = gi
+            st.session_state[f"{table}_pick"] = gi
+        picked_from_grid = True
     csv = df.rename(columns={**all_labels, **{f["col"]: f["label"] for f in pics}})
     st.download_button("⬇️ Excel (CSV) download", csv.to_csv(index=False).encode("utf-8-sig"),
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
@@ -926,7 +946,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         if colx.button(f["button"], use_container_width=True, key=f"{table}_b{n}"):
             st.session_state[state_key] = (idx, f["col"])
 
-    photo_update_box(db, table, cols, df, idx, pics)
+    photo_update_box(db, table, cols, df, idx, pics, expanded=picked_from_grid)
 
     chosen = st.session_state.get(state_key)
     if not chosen or chosen[0] != idx:
@@ -948,7 +968,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
             st.markdown(f"[🔗 Photo poore size mein kholein]({src})")
 
 
-def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict]):
+def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict], expanded=False):
     """Chuni hui entry mein photo jodna / badalna (ek-ek karke)."""
     id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
     msg_key = f"{table}_photo_upd_msg"
@@ -958,7 +978,8 @@ def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict]
     if not id_col or id_col not in df.columns:
         return
     row_id = df.at[idx, id_col]
-    with st.expander("📷 Photo Update – is entry mein photo jodein / badlein"):
+    sel = " | ".join(str(df.at[idx, c]) for c in list(df.columns)[:2])
+    with st.expander(f"📷 Photo Update – {sel}", expanded=expanded):
         names = {f["col"]: f["label"] for f in pics}
         # Machine Counter mein OUT photo pehle se chuni rahe
         default = next((i for i, f in enumerate(pics) if "out" in f["col"].lower()), 0)
