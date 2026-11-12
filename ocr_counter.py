@@ -13,8 +13,10 @@ import io
 import re
 import shutil
 import subprocess
+from collections import Counter
 from datetime import date
 
+import numpy as np
 import requests
 from PIL import Image, ImageChops, ImageFilter, ImageOps
 
@@ -52,6 +54,31 @@ def _flatten(img: Image.Image) -> Image.Image:
     return ImageOps.invert(ImageOps.autocontrast(diff, cutoff=1))
 
 
+def _remove_lines(img: Image.Image) -> Image.Image:
+    """Table ki lambi seedhi lines (khadi aur aadi) mita deta hai, taaki unse sate ank padhe ja sakein."""
+    a = np.array(img)
+    dark = a < 150
+    L = max(40, img.width // 30)                # isse lambi seedhi lakeer = table line
+
+    def covered(d):                             # har pixel jo L-lambi poori kaali pankti mein ho
+        h, w = d.shape
+        if w < L:
+            return np.zeros_like(d)
+        cs = np.cumsum(np.pad(d.astype(np.int32), ((0, 0), (1, 0))), axis=1)
+        full = (cs[:, L:] - cs[:, :-L]) == L    # (h, w-L+1): start j se L pixel kaale
+        cf = np.cumsum(np.pad(full.astype(np.int32), ((0, 0), (1, 0))), axis=1)
+        x = np.arange(w)
+        hi = np.minimum(x + 1, full.shape[1])
+        lo = np.clip(x - L + 1, 0, full.shape[1])
+        return (cf[:, hi] - cf[:, lo]) > 0
+
+    mask = covered(dark) | covered(dark.T).T
+    mask = mask | np.roll(mask, 1, 0) | np.roll(mask, -1, 0) | np.roll(mask, 1, 1) | np.roll(mask, -1, 1)
+    a = a.copy()
+    a[mask] = 255
+    return Image.fromarray(a)
+
+
 def _prepare(image_bytes: bytes) -> list[Image.Image]:
     """Photo ko OCR ke layak banata hai: seedha, grey, bada, saaf. Kai roop lautata hai."""
     img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("L")
@@ -69,9 +96,9 @@ def _prepare(image_bytes: bytes) -> list[Image.Image]:
     if abs(angle) >= 0.5:
         img = img.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor=255)
     flat = _flatten(img)
+    clean = _remove_lines(flat)                                          # table lines hata kar
     plain = ImageOps.autocontrast(img, cutoff=1).filter(ImageFilter.SHARPEN)
-    binar = flat.point(lambda v: 0 if v < 150 else 255)
-    return [flat, plain, binar]
+    return [clean, flat, _remove_lines(plain)]
 
 
 def tesseract_available() -> bool:
@@ -116,20 +143,37 @@ def _rows_from_tsv(tsv: str) -> str:
     return "\n".join(" ".join(t for _, t in sorted(r[1])) for r in rows)
 
 
-def ocr_tesseract(image_bytes: bytes) -> str:
+def _vote(results: list[dict]) -> dict:
+    """Kai baar padhne ke nateejon mein se har value ka bahumat (sabse zyada baar aayi value)."""
+    out = {}
+    good = [r for r in results if r.get("counter") == "101" and r.get("_prio", 9) <= 1]
+    for key in ("model", "serial", "date", "counter", "total"):
+        pool = good if key == "total" and good else results
+        vals = [r[key] for r in pool if r.get(key) is not None]
+        if vals:
+            out[key] = Counter(vals).most_common(1)[0][0]
+    return out
+
+
+def ocr_tesseract(image_bytes: bytes) -> tuple[str, dict]:
+    """Photo ko 3 roop x 2 tareeke se padhta hai; (poora text, bahumat wali values) lautata hai."""
     if not tesseract_available():
         raise RuntimeError("Tesseract install nahi hai (Streamlit Cloud ke liye packages.txt chahiye).")
-    texts = []
+    texts, results = [], []
     for img in _prepare(image_bytes):
-        texts.append(_rows_from_tsv(_tesseract(img, 11, tsv=True)))
-        texts.append(_tesseract(img, 6))
-        d = parse_counter("\n".join(texts))
-        if d.get("total") and d.get("_prio", 9) <= 1 and d.get("serial"):
-            break
-    for img in _prepare(image_bytes)[:1]:                     # aakhri koshish: alag layout
-        if parse_counter("\n".join(texts)).get("_prio", 9) > 1:
-            texts.append(_rows_from_tsv(_tesseract(img, 4, tsv=True)))
-    return "\n".join(texts)
+        for t in (_rows_from_tsv(_tesseract(img, 11, tsv=True)), _tesseract(img, 6)):
+            texts.append(t)
+            results.append(parse_counter(t))
+    if not any(r.get("total") for r in results):                # aakhri koshish: alag layout
+        img = _prepare(image_bytes)[0]
+        t = _rows_from_tsv(_tesseract(img, 4, tsv=True))
+        texts.append(t)
+        results.append(parse_counter(t))
+    data = _vote(results)
+    if not data.get("total"):                                    # sab mila kar ek baar aur
+        whole = parse_counter("\n".join(texts))
+        data = {**whole, **data}
+    return "\n".join(texts), data
 
 
 def ocr_space(image_bytes: bytes, api_key: str) -> str:
@@ -165,8 +209,8 @@ def read_photo(image_bytes: bytes, ocr_space_key: str = "") -> tuple[dict, str, 
         except Exception as e:                       # OCR.space na chale to Tesseract
             errors.append(str(e))
     try:
-        text = ocr_tesseract(image_bytes)
-        return parse_counter(text), text, "Tesseract"
+        text, data = ocr_tesseract(image_bytes)
+        return data, text, "Tesseract"
     except Exception as e:
         errors.append(str(e))
     raise RuntimeError(" | ".join(errors))
@@ -255,6 +299,8 @@ def parse_counter(text: str) -> dict:
                       r"machine\s*(?:model|name)|printer\s*model)\b\s*[:=\-.]?\s*(.+)", l)
         if m:
             v = _clean_value(m[1])
+            v = re.sub(r"\s*\(\s*", " (", v)
+            v = re.sub(r"\s*\)", ")", v).strip()
             if len(v) >= 3 and re.search(r"[A-Za-z0-9]", v):
                 out["model"] = v[:60]
                 break
@@ -268,7 +314,9 @@ def parse_counter(text: str) -> dict:
         m = re.search(r"(?i)(?:serial\s*(?:no\.?|number|num|#)?|s\s*/\s*n|sr\.?\s*no\.?|"
                       r"machine\s*(?:id|no\.?|serial))\s*[:=\-.]?\s*([A-Z0-9][A-Z0-9\-]{3,})", l)
         if m and re.search(r"\d", m[1]):
-            out["serial"] = m[1].upper().strip("-")
+            sr = m[1].upper().strip("-")
+            sr = re.sub(r"O(?=\d)|(?<=\d)O", "0", sr)        # YCPO1400 -> YCP01400
+            out["serial"] = sr
             break
 
     # ---- Reading date ("date" wali line ko pehle dekho)
@@ -309,7 +357,8 @@ def parse_counter(text: str) -> dict:
     if not cands:                                # aakhri upaay: sabse bada counter jaisa number
         nums = []
         for l in nlines:
-            if _dates_in(l) or re.search(r"(?i)serial|s/n|\d{1,2}:\d{2}", l):
+            if _dates_in(l) or re.search(r"(?i)serial|s/n|model|device|product|i[Rr][- ]?adv|"
+                                         r"date|\d{1,2}:\d{2}", l):
                 continue
             for n in re.findall(NUM, l):
                 v = _num(n)
