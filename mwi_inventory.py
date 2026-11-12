@@ -101,6 +101,7 @@ FIELD_ORDER = {
             F("Reading Date (OUT)", ["reading_date_out", "date_out"], "Reading_Date_out", "date"),
             F("Counter No (OUT)", ["counter_no_out", "counter_out"], "Counter_No_out", "text"),
             F("Total (OUT)", ["total_out", "total_count_out", "count_out"], "Total_out", "bigint"),
+            F("Net Total", ["net_total", "net_count", "net"], "Net_Total", "bigint"),
         ],
         "last": [
             F("Reason", ["reason", "remark", "remarks"], "Reason", "text"),
@@ -171,7 +172,16 @@ def _minus(a, b):
     return a - (b or 0)
 
 
+def _both_minus(a, b):
+    """Dono value hon tabhi  a - b."""
+    return None if a is None or b is None else a - b
+
+
 CALC = {
+    "Machine_Counter": [
+        {"target": "Net Total", "uses": ["Total (OUT)", "Total (IN)"], "fn": _both_minus,
+         "desc": "Total OUT − Total IN", "no_negative": True},
+    ],
     "Toner": [
         {"target": "Toner Balance Qty", "uses": ["Toner Qty", "Toner Used"], "fn": _minus,
          "desc": "Toner Qty − Toner Used", "no_negative": True},
@@ -202,6 +212,8 @@ def run_rule(rule: dict, values: dict, types: dict):
     if args[0] is None:
         return None
     res = rule["fn"](*args)
+    if res is None:
+        return None
     if types.get(rule["t_col"]) in INT_TYPES:
         res = int(round(res))
     return res
