@@ -309,6 +309,12 @@ class Supabase:
         return self._check(requests.patch(self.base + table, headers=h,
                                           params={id_col: f"eq.{id_val}"}, json=row, timeout=20))
 
+    def delete(self, table: str, id_col: str, id_val):
+        """Ek entry (id se) mitata hai. Miti hui rows lautata hai ([] = permission nahi/entry nahi)."""
+        h = {**self.h, "Prefer": "return=representation"}
+        return self._check(requests.delete(self.base + table, headers=h,
+                                           params={id_col: f"eq.{id_val}"}, timeout=20))
+
     def insert(self, table: str, row: dict):
         h = {**self.h, "Prefer": "return=minimal"}
         return self._check(requests.post(self.base + table, headers=h,
@@ -959,7 +965,8 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     for f in pics:
         view[f["col"]] = view[f["col"]].map(lambda v: image_src(db, v))
         cfg[f["col"]] = st.column_config.ImageColumn(f["label"], width="small")
-    grid_kw = dict(on_select="rerun", selection_mode="single-row", key=f"{table}_grid")
+    grid_kw = dict(on_select="rerun", selection_mode="single-row",
+                   key=f"{table}_grid_{st.session_state.get(f'{table}_gver', 0)}")
     try:
         ev = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg, **grid_kw)
     except TypeError:                                  # purana Streamlit: row chunna nahi
@@ -1026,7 +1033,7 @@ def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_row
     id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
     msg = st.session_state.pop(f"{table}_edit_msg", None)
     if msg:
-        st.success(msg)
+        (st.error if msg.startswith("❌") else st.success)(msg)
     if not id_col or id_col not in df.columns:
         return False
     edit_key = f"{table}_edit_id"
@@ -1034,10 +1041,35 @@ def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_row
         gi = df.index[sel_rows[0]]
         rid = int(df.at[gi, id_col])
         summary = " | ".join(str(df.at[gi, c]) for c in list(df.columns)[:3])
-        c1, c2 = st.columns([1, 3])
+        del_key = f"{table}_del_id"
+        c1, c2, c3 = st.columns([1, 1, 3])
         if c1.button("✏️ Edit", type="primary", use_container_width=True, key=f"{table}_editbtn"):
             st.session_state[edit_key] = rid
-        c2.markdown(f"Selected Entry: **{summary}**")
+            st.session_state.pop(del_key, None)
+        if c2.button("🗑️ Delete", use_container_width=True, key=f"{table}_delbtn"):
+            st.session_state[del_key] = rid
+            st.session_state.pop(edit_key, None)
+        c3.markdown(f"Selected Entry: **{summary}**")
+
+        # Delete se pehle pakka poochho
+        if st.session_state.get(del_key) == rid:
+            st.warning(f"⚠️ Confirm Delete: **{summary}**")
+            d1, d2, _ = st.columns([1, 1, 3])
+            if d1.button("✅ Yes", type="primary", use_container_width=True,
+                         key=f"{table}_delyes"):
+                try:
+                    gone = db.delete(table, id_col, rid)
+                    st.session_state[f"{table}_edit_msg"] = (
+                        f"🗑️ Entry Deleted (id {rid})" if gone else
+                        "❌ Entry delete nahi hui – Supabase mein 'delete_permission.sql' chalayein (ek baar).")
+                except Exception as e:
+                    st.session_state[f"{table}_edit_msg"] = f"❌ Delete nahi hua: {e}"
+                st.session_state.pop(del_key, None)
+                st.session_state[f"{table}_gver"] = st.session_state.get(f"{table}_gver", 0) + 1
+                st.rerun()
+            if d2.button("✖ No", use_container_width=True, key=f"{table}_delno"):
+                st.session_state.pop(del_key, None)
+                st.rerun()
 
     eid = st.session_state.get(edit_key)
     if eid is None:
