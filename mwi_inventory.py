@@ -33,6 +33,8 @@ import requests
 import streamlit as st
 from PIL import Image, ImageOps
 
+OCR_ENABLED = False                        # True karne par photo ka OCR (dheema) wapas chalu
+
 try:
     import importlib
     import ocr_counter                     # Machine Counter photo ka OCR
@@ -624,6 +626,21 @@ def lookup_by_serial(db, table: str, labels: dict, order_col: str, serial: str) 
     return out
 
 
+def filename_fill(photo, k: str, pcol: str, labels: dict):
+    """Bina OCR: sirf photo ki file ke naam se Machine No (M1.jpeg -> M1). Turant, koi intezaar nahi."""
+    sig_key = f"{k}_{pcol}_fnsig"
+    sig = (getattr(photo, "file_id", None) or getattr(photo, "name", ""), getattr(photo, "size", 0))
+    mno = machine_from_filename(getattr(photo, "name", ""))
+    mcol = {lbl: c for c, lbl in labels.items()}.get("Machine No")
+    if st.session_state.get(sig_key) != sig:
+        st.session_state[sig_key] = sig
+        if mno and mcol and st.session_state.get(f"{k}_{mcol}") != mno:
+            st.session_state[f"{k}_pending"] = {mcol: mno}   # box pehle ban chuka: agli baar bharenge
+            st.rerun()
+    if mno and mcol:
+        st.caption(f"🏷️ Machine No: **{mno}** (file ke naam se)")
+
+
 def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str,
              db=None, table: str = "", labels: dict | None = None, order_col: str = "id"):
     """Nayi photo aane par OCR karke us group ke fields bharta hai.
@@ -810,8 +827,11 @@ def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = N
             st.markdown(f"#### 📷 {f['label']}")
             uploads[f["col"]] = pick_photo(f)
             if uploads[f["col"]] is not None:
-                ocr_fill(uploads[f["col"]], ocr_groups[f["col"]], by_name, k, f["col"],
-                         db, table, labels, cols[0]["column_name"])
+                if OCR_ENABLED:
+                    ocr_fill(uploads[f["col"]], ocr_groups[f["col"]], by_name, k, f["col"],
+                             db, table, labels, cols[0]["column_name"])
+                else:
+                    filename_fill(uploads[f["col"]], k, f["col"], labels)
         pending.append((name, label))
     flush()
 
