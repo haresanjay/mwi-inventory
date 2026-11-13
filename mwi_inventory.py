@@ -936,6 +936,13 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.info("Empty Entry ?")
         return
     df = pd.DataFrame(rows)
+    sc = summary_cols(table, cols)         # Machine Counter: dates / totals ke columns
+    days_col = None
+    if sc.get("din") in df.columns and sc.get("dout") in df.columns:
+        days = (pd.to_datetime(df[sc["dout"]], errors="coerce")
+                - pd.to_datetime(df[sc["din"]], errors="coerce")).dt.days
+        days_col = "Net Days"
+        df[days_col] = days.astype("Int64")
     for c in cols:                         # poore ank bina .00 ke
         if c["column_name"] in df.columns and is_whole(c):
             df[c["column_name"]] = pd.to_numeric(df[c["column_name"]], errors="coerce").round().astype("Int64")
@@ -956,6 +963,9 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     order = ([c["column_name"] for c in auto if not c["data_type"].startswith("timestamp")]
              + [n for n, _ in ordered] + pic_cols
              + [c["column_name"] for c in auto if c["data_type"].startswith("timestamp")])
+    if days_col:                           # Net Days: Reading Date (OUT) ke theek baad
+        at = order.index(sc["dout"]) + 1 if sc["dout"] in order else len(order)
+        order.insert(at, days_col)
     order = [c for c in order if c in df.columns] + [c for c in df.columns if c not in order]
     df = df[order]
     all_labels = {n: lbl for n, lbl in ordered}
@@ -986,6 +996,8 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     csv = df.rename(columns={**all_labels, **{f["col"]: f["label"] for f in pics}})
     st.download_button("⬇️ Excel (CSV) download", csv.to_csv(index=False).encode("utf-8-sig"),
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
+    if sc:
+        counter_summary(db, table, sc)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
         return                                     # edit chal raha hai: neeche ka hissa chhupa
@@ -1026,6 +1038,48 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.image(src, caption=title, use_container_width=True)
         if src.startswith("http"):
             st.markdown(f"[🔗 Photo poore size mein kholein]({src})")
+
+
+def summary_cols(table: str, cols: list[dict]) -> dict:
+    """Machine Counter ke Reading Date IN/OUT, Total IN/OUT, Net Total ke asli column naam."""
+    if table != "Machine_Counter":
+        return {}
+    inputs = [c for c in cols if not c["is_auto"]]
+    _, labels, _ = arrange_fields(table, inputs)
+    by_label = {lbl: col for col, lbl in labels.items()}
+    out = {"din": by_label.get("Reading Date (IN)"), "dout": by_label.get("Reading Date (OUT)"),
+           "tin": by_label.get("Total (IN)"), "tout": by_label.get("Total (OUT)"),
+           "net": by_label.get("Net Total")}
+    return {k: v for k, v in out.items() if v}
+
+
+def counter_summary(db, table: str, sc: dict):
+    """CSV download ke neeche: poori Machine_Counter table ka jod."""
+    try:
+        rows = db.select(table, {"select": ",".join(sorted(set(sc.values()))), "limit": 100000})
+    except Exception as e:
+        st.caption(f"Total nahi nikal saka: {e}")
+        return
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return
+
+    def total(key):
+        if sc.get(key) not in df.columns:
+            return None
+        return int(round(pd.to_numeric(df[sc[key]], errors="coerce").sum()))
+
+    days = None
+    if sc.get("din") in df.columns and sc.get("dout") in df.columns:
+        d = (pd.to_datetime(df[sc["dout"]], errors="coerce")
+             - pd.to_datetime(df[sc["din"]], errors="coerce")).dt.days
+        days = int(d.sum()) if d.notna().any() else 0
+    items = [("Total Days", days), ("Total In", total("tin")),
+             ("Total Out", total("tout")), ("Net Total", total("net"))]
+    items = [(n, v) for n, v in items if v is not None]
+    st.markdown("**Grand Total**")
+    for colx, (name, v) in zip(st.columns(len(items)), items):
+        colx.metric(name, f"{v:,}")
 
 
 def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_rows: list) -> bool:
