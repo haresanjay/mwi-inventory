@@ -1080,8 +1080,13 @@ def counter_summary(db, table: str, sc: dict):
              ("Total Out", total("tout")), ("Net Total", total("net"))]
     items = [(n, v) for n, v in items if v is not None]
     st.markdown("**Grand Total**")
-    for colx, (name, v) in zip(st.columns(len(items)), items):
-        colx.metric(name, f"{v:,}")
+    cards = "".join(
+        f'<div style="flex:1 1 140px;min-width:0;padding:8px 12px;border:1px solid rgba(128,128,128,.35);'
+        f'border-radius:8px"><div style="font-size:.85rem;opacity:.75">{name}</div>'
+        f'<div style="font-size:1.35rem;font-weight:600;white-space:nowrap">{v:,}</div></div>'
+        for name, v in items)
+    st.markdown(f'<div style="display:flex;flex-wrap:wrap;gap:10px">{cards}</div>',
+                unsafe_allow_html=True)
 
 
 def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_rows: list) -> bool:
