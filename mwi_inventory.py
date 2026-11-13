@@ -772,7 +772,7 @@ def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = N
         if name in rules:                          # apne-aap hisaab, bharna nahi
             r = rules[name]
             res = run_rule(r, values, types)
-            st.text_input(f"{label} (Auto = {r['desc']})",
+            st.text_input(label,
                           value="" if res is None else f"{res:g}", disabled=True,
                           key=f"{k}_{name}_auto_{res}")
             if r.get("no_negative") and res is not None and res < 0:
@@ -785,7 +785,7 @@ def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = N
         if edit:
             cur = image_src(db, edit["row"].get(f["col"]))
             if cur:
-                st.image(cur, caption="Abhi wali photo (nayi daalne par badlegi)", width=160)
+                st.image(cur, width=160)
         return photo_picker(f["label"], f"{k}_{f['col']}")
 
     pending = []
@@ -1038,8 +1038,6 @@ def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_row
         if c1.button("✏️ Edit", type="primary", use_container_width=True, key=f"{table}_editbtn"):
             st.session_state[edit_key] = rid
         c2.markdown(f"Selected Entry: **{summary}**")
-    elif st.session_state.get(edit_key) is None:
-        st.caption("✏️ Edit ke liye upar table mein row par click karein.")
 
     eid = st.session_state.get(edit_key)
     if eid is None:
@@ -1091,7 +1089,7 @@ def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict]
         f = next(x for x in pics if x["col"] == pcol)
         cur = image_src(db, df.at[idx, pcol]) if pcol in df.columns else None
         if cur:
-            st.image(cur, caption="Abhi wali photo (nayi daalne par badal jayegi)", width=200)
+            st.image(cur, width=200)
         ver = st.session_state.get(f"{table}_pu_ver", 0)
         up = photo_picker(f["label"], f"{table}_pu_{ver}")
         if st.button("💾 Save Photo", type="primary", disabled=up is None,
