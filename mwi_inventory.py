@@ -1058,7 +1058,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     else:
         st.image(src, caption=title, use_container_width=True)
         if src.startswith("http"):
-            st.markdown(f"[🔗 Photo poore size mein kholein]({src})")
+            st.markdown(f"[🔗 Photo Full Size]({src})")
 
 
 def summary_cols(table: str, cols: list[dict]) -> dict:
