@@ -12,6 +12,7 @@ Chalane ke liye:  run_app.bat  par double-click   (ya:  streamlit run mwi_invent
 """
 
 import hashlib
+import hmac
 import io
 import json
 import re
@@ -1265,9 +1266,51 @@ def connection_sidebar() -> tuple[str, str]:
     return url.strip(), key.strip()
 
 
+def app_users() -> dict:
+    """Login ke users: Streamlit Secrets ke [users] se (ya local mwi_settings.json ke "users" se)."""
+    try:
+        u = dict(st.secrets["users"])
+        if u:
+            return {str(k).strip().lower(): str(v) for k, v in u.items()}
+    except Exception:
+        pass
+    u = load_settings().get("users") or {}
+    return {str(k).strip().lower(): str(v) for k, v in u.items()}
+
+
+def login_gate() -> bool:
+    """User + Password. Users set na hon to login nahi maanga jata."""
+    users = app_users()
+    if not users:
+        return True
+    if st.session_state.get("login_user") in users:
+        with st.sidebar:
+            st.markdown(f"👤 **{st.session_state['login_user']}**")
+            if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+                st.session_state.pop("login_user", None)
+                st.rerun()
+        return True
+    c = st.columns([1, 2, 1])[1]
+    with c:
+        st.subheader("🔐 Login")
+        with st.form("login_form"):
+            u = st.text_input("User")
+            pw = st.text_input("Password", type="password")
+            ok = st.form_submit_button("Login", type="primary", use_container_width=True)
+        if ok:
+            name = u.strip().lower()
+            if name in users and hmac.compare_digest(pw.encode(), users[name].encode()):
+                st.session_state["login_user"] = name
+                st.rerun()
+            st.error("User ya Password galat hai")
+    return False
+
+
 def main():
     st.set_page_config(page_title="MWI Inventory", page_icon="📦", layout="wide")
     st.title("📦 MWI Print – Inventory")
+    if not login_gate():
+        st.stop()
 
     url, key = connection_sidebar()
     if not url or not key:
