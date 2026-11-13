@@ -1090,30 +1090,38 @@ def counter_summary(db, table: str, sc: dict):
             return None
         return int(round(pd.to_numeric(df[sc[key]], errors="coerce").sum()))
 
-    # Start Date = pehli Reading Date (IN), End Date = aakhri Reading Date (OUT)
-    # (sirf wo entries jinmein dono date hain);  Total Days = End - Start  (jod nahi)
-    days = start = end = None
-    if sc.get("din") in df.columns and sc.get("dout") in df.columns:
-        din = pd.to_datetime(df[sc["din"]], errors="coerce")
-        dout = pd.to_datetime(df[sc["dout"]], errors="coerce")
-        both = din.notna() & dout.notna()
-        if both.any():
-            start, end = din[both].min(), dout[both].max()
-            days = int((end - start).days)
-    items = [("Total Days", f"{days:,}" if days is not None else "–"),
-             ("Start Date", start.strftime("%d-%m-%Y") if start is not None else "–"),
-             ("End Date", end.strftime("%d-%m-%Y") if end is not None else "–")]
-    out = total("net")                                   # Total Output = sab Net Total ka jod
-    if out is not None:
-        items.append(("Total Output", f"{out:,}"))
+    # Har alag avadhi (Reading Date IN -> Reading Date OUT) ki alag row:
+    # Total Days = End - Start,  Total Output = us avadhi ki entries ke Net Total ka jod
+    if sc.get("din") not in df.columns or sc.get("dout") not in df.columns:
+        return
+    g = pd.DataFrame({
+        "start": pd.to_datetime(df[sc["din"]], errors="coerce"),
+        "end": pd.to_datetime(df[sc["dout"]], errors="coerce"),
+        "net": pd.to_numeric(df[sc["net"]], errors="coerce") if sc.get("net") in df.columns else 0,
+    }).dropna(subset=["start", "end"])
+    if g.empty:
+        return
+    groups = (g.groupby(["start", "end"], as_index=False)
+               .agg(output=("net", "sum"), n=("net", "size"))
+               .sort_values(["start", "end"]))
+
+    def card(name, v):
+        return (f'<div style="flex:1 1 130px;min-width:0;padding:8px 12px;border:1px solid '
+                f'rgba(128,128,128,.35);border-radius:8px"><div style="font-size:.85rem;opacity:.75">'
+                f'{name}</div><div style="font-size:1.35rem;font-weight:600;white-space:nowrap">{v}</div></div>')
+
     st.markdown("**Grand Total**")
-    cards = "".join(
-        f'<div style="flex:1 1 140px;min-width:0;padding:8px 12px;border:1px solid rgba(128,128,128,.35);'
-        f'border-radius:8px"><div style="font-size:.85rem;opacity:.75">{name}</div>'
-        f'<div style="font-size:1.35rem;font-weight:600;white-space:nowrap">{v}</div></div>'
-        for name, v in items)
-    st.markdown(f'<div style="display:flex;flex-wrap:wrap;gap:10px">{cards}</div>',
-                unsafe_allow_html=True)
+    rows_html = []
+    for r in groups.itertuples():
+        days = int((r.end - r.start).days)
+        rows_html.append(
+            '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px">'
+            + card("Total Days", f"{days:,}")
+            + card("Start Date", r.start.strftime("%d-%m-%Y"))
+            + card("End Date", r.end.strftime("%d-%m-%Y"))
+            + card("Total Output", f"{int(round(r.output)):,}")
+            + "</div>")
+    st.markdown("".join(rows_html), unsafe_allow_html=True)
 
 
 def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_rows: list) -> bool:
@@ -1230,12 +1238,21 @@ def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict]
 
 
 # ------------------------------------------------------------------ app
+def looks_like_key(k: str) -> bool:
+    """Supabase anon/publishable key jaisi lagti hai? (JWT 'eyJ...' ya 'sb_publishable_...')"""
+    k = (k or "").strip()
+    return (k.startswith("eyJ") and k.count(".") == 2 and len(k) > 100) or k.startswith("sb_publishable_")
+
+
 def cloud_secrets() -> tuple[str, str]:
     """Streamlit Cloud par chal raha ho to Secrets se URL/Key lo."""
-    try:
-        return st.secrets["SUPABASE_URL"].strip(), st.secrets["SUPABASE_KEY"].strip()
-    except Exception:
-        return "", ""
+    for src in ("", "users"):              # galti se [users] ke neeche likhi ho to bhi
+        try:
+            sec = st.secrets[src] if src else st.secrets
+            return str(sec["SUPABASE_URL"]).strip(), str(sec["SUPABASE_KEY"]).strip()
+        except Exception:
+            continue
+    return "", ""
 
 
 def connection_sidebar() -> tuple[str, str]:
@@ -1253,8 +1270,13 @@ def connection_sidebar() -> tuple[str, str]:
     with st.sidebar:
         st.header("🔌 Supabase Connection")
         url = st.text_input("Project URL", value=s.get("url", DEFAULT_URL))
-        key = st.text_input("Anon / Publishable Key", value=s.get("key", ""), type="password")
-        if st.button("💾 Settings Save", use_container_width=True):
+        saved_key = s.get("key", "") if looks_like_key(s.get("key", "")) else ""
+        key = st.text_input("Anon / Publishable Key", value=saved_key, type="password")
+        if key.strip() and not looks_like_key(key):
+            st.error("Ye Supabase ki Anon Key nahi hai (login ka password yahan na daalein). "
+                     "Anon Key 'eyJ...' ya 'sb_publishable_...' se shuru hoti hai.")
+            key = ""
+        if st.button("💾 Settings Save", use_container_width=True) and key:
             save_settings({"url": url.strip(), "key": key.strip()})
             get_columns.clear()
             st.success("Save ho gaya.")
@@ -1266,23 +1288,33 @@ def connection_sidebar() -> tuple[str, str]:
     return url.strip(), key.strip()
 
 
+# Default login (jab Secrets mein [users] na ho): op1 / upper   (password ka sirf hash rakha hai)
+DEFAULT_USERS = {"op1": "sha256:aee610558292023758a4229ddcf75f167c9904313a83cf795232ed7f7e2131c9"}
+
+
+def _pw_ok(given: str, stored: str) -> bool:
+    if stored.startswith("sha256:"):
+        return hmac.compare_digest(hashlib.sha256(given.encode()).hexdigest(), stored[7:])
+    return hmac.compare_digest(given.encode(), stored.encode())
+
+
 def app_users() -> dict:
-    """Login ke users: Streamlit Secrets ke [users] se (ya local mwi_settings.json ke "users" se)."""
+    """Login ke users: Streamlit Secrets ke [users] se (ya local mwi_settings.json ke "users" se).
+    Kahin na milein to DEFAULT_USERS."""
     try:
-        u = dict(st.secrets["users"])
+        u = {k: v for k, v in dict(st.secrets["users"]).items()
+             if not str(k).lower().startswith("supabase") and isinstance(v, (str, int))}
         if u:
             return {str(k).strip().lower(): str(v) for k, v in u.items()}
     except Exception:
         pass
-    u = load_settings().get("users") or {}
+    u = load_settings().get("users") or DEFAULT_USERS
     return {str(k).strip().lower(): str(v) for k, v in u.items()}
 
 
 def login_gate() -> bool:
-    """User + Password. Users set na hon to login nahi maanga jata."""
+    """App khulte hi pehle User + Password."""
     users = app_users()
-    if not users:
-        return True
     if st.session_state.get("login_user") in users:
         with st.sidebar:
             st.markdown(f"👤 **{st.session_state['login_user']}**")
@@ -1299,7 +1331,7 @@ def login_gate() -> bool:
             ok = st.form_submit_button("Login", type="primary", use_container_width=True)
         if ok:
             name = u.strip().lower()
-            if name in users and hmac.compare_digest(pw.encode(), users[name].encode()):
+            if name in users and _pw_ok(pw, users[name]):
                 st.session_state["login_user"] = name
                 st.rerun()
             st.error("User ya Password galat hai")
@@ -1315,6 +1347,12 @@ def main():
     url, key = connection_sidebar()
     if not url or not key:
         st.info("👈 Sidebar mein Supabase ki **Anon Key** daalein aur 'Settings Save' dabayein.")
+        st.stop()
+
+    if not looks_like_key(key):
+        st.error("⚠️ Streamlit Secrets mein **SUPABASE_KEY** sahi nahi hai. Wahan Supabase ki asli "
+                 "Anon Key daalein (jo **eyJ...** ya **sb_publishable_...** se shuru hoti hai) – "
+                 "Supabase → Project Settings → API Keys se copy karein.")
         st.stop()
 
     db = Supabase(url, key)
