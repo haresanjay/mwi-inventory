@@ -1071,9 +1071,11 @@ def counter_summary(db, table: str, sc: dict):
 
     days = None
     if sc.get("din") in df.columns and sc.get("dout") in df.columns:
-        d = (pd.to_datetime(df[sc["dout"]], errors="coerce")
-             - pd.to_datetime(df[sc["din"]], errors="coerce")).dt.days
-        days = int(d.sum()) if d.notna().any() else 0
+        # Total Days = jod nahi; pehli Reading Date (IN) se aakhri Reading Date (OUT) tak ke din
+        din = pd.to_datetime(df[sc["din"]], errors="coerce")
+        dout = pd.to_datetime(df[sc["dout"]], errors="coerce")
+        both = din.notna() & dout.notna()
+        days = int((dout[both].max() - din[both].min()).days) if both.any() else 0
     items = [("Total Days", days), ("Total In", total("tin")),
              ("Total Out", total("tout")), ("Net Total", total("net"))]
     items = [(n, v) for n, v in items if v is not None]
