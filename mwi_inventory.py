@@ -1070,7 +1070,7 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
     by_label = {lbl: col for col, lbl in labels.items()}
     out = {"din": by_label.get("Reading Date (IN)"), "dout": by_label.get("Reading Date (OUT)"),
            "tin": by_label.get("Total (IN)"), "tout": by_label.get("Total (OUT)"),
-           "net": by_label.get("Net Total")}
+           "net": by_label.get("Net Total"), "mach": by_label.get("Machine No")}
     return {k: v for k, v in out.items() if v}
 
 
@@ -1098,11 +1098,15 @@ def counter_summary(db, table: str, sc: dict):
         "start": pd.to_datetime(df[sc["din"]], errors="coerce"),
         "end": pd.to_datetime(df[sc["dout"]], errors="coerce"),
         "net": pd.to_numeric(df[sc["net"]], errors="coerce") if sc.get("net") in df.columns else 0,
+        # Machine No ek jaisa likhne ke liye: M-1, m1, M01 = M1
+        "mach": (df[sc["mach"]].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                 .str.replace(r"^M0*", "M", regex=True).where(df[sc["mach"]].notna())
+                 if sc.get("mach") in df.columns else pd.Series(range(len(df)), index=df.index)),
     }).dropna(subset=["start", "end"])
     if g.empty:
         return
     groups = (g.groupby(["start", "end"], as_index=False)
-               .agg(output=("net", "sum"), n=("net", "size"))
+               .agg(output=("net", "sum"), machines=("mach", "nunique"))
                .sort_values(["start", "end"]))
 
     def card(name, v):
@@ -1120,6 +1124,7 @@ def counter_summary(db, table: str, sc: dict):
             + card("Start Date", r.start.strftime("%d-%m-%Y"))
             + card("End Date", r.end.strftime("%d-%m-%Y"))
             + card("Total Output", f"{int(round(r.output)):,}")
+            + card("Total Machine No", f"{int(r.machines):,}")
             + "</div>")
     st.markdown("".join(rows_html), unsafe_allow_html=True)
 
