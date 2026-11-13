@@ -384,8 +384,9 @@ def input_for(col: dict, key: str, label: str | None = None):
         c1, c2 = st.columns(2)
         dv = {} if key + "_d" in st.session_state else {"value": now_ist().date()}
         d = c1.date_input(label, format="DD/MM/YYYY", key=key + "_d", **dv)
-        t = c2.time_input("Time", value=now_ist().time().replace(second=0, microsecond=0, tzinfo=None),
-                          key=key + "_t")
+        tv = {} if key + "_t" in st.session_state else {
+            "value": now_ist().time().replace(second=0, microsecond=0, tzinfo=None)}
+        t = c2.time_input("Time", key=key + "_t", **tv)
         return datetime.combine(d, t, tzinfo=IST) if d else None
     if dt.startswith("time"):
         return st.time_input(label, value=None, key=key)
@@ -524,6 +525,38 @@ def set_widget(col: dict, key: str, value):
             pass
     else:
         ss[key] = str(value)
+
+
+def prefill_widget(col: dict, key: str, raw):
+    """Edit ke liye: database ki purani value ko form ke box mein pehle se bharta hai."""
+    dt = col["data_type"]
+    ss = st.session_state
+    empty = raw is None or (isinstance(raw, str) and raw.strip() == "")
+    try:
+        if dt == "date":
+            ss[key] = None if empty else date.fromisoformat(str(raw)[:10])
+        elif dt.startswith("timestamp"):
+            if empty:
+                ss[key + "_d"], ss[key + "_t"] = None, None
+            else:
+                d = pd.to_datetime(raw, utc=True).tz_convert(IST)
+                ss[key + "_d"], ss[key + "_t"] = d.date(), d.time().replace(second=0, microsecond=0)
+        elif dt.startswith("time"):
+            ss[key] = None if empty else time.fromisoformat(str(raw)[:8])
+        elif dt == "boolean":
+            ss[key] = bool(raw) if not empty else False
+        elif is_whole(col):
+            ss[key] = None if empty else int(round(float(raw)))
+        elif dt in NUM_TYPES:
+            ss[key] = None if empty else float(raw)
+        elif dt in ("json", "jsonb"):
+            ss[key] = "" if empty else json.dumps(raw, ensure_ascii=False)
+        elif dt == "ARRAY":
+            ss[key] = "" if empty else ", ".join(map(str, raw))
+        else:
+            ss[key] = "" if empty else str(raw)
+    except (ValueError, TypeError):
+        ss[key] = None if (is_whole(col) or dt in NUM_TYPES or dt == "date") else str(raw or "")
 
 
 def machine_from_filename(name: str) -> str:
@@ -680,15 +713,22 @@ def ocr_fill(photo, targets: dict, by_name: dict, k: str, pcol: str,
                        "bharein, agli baar apne-aap aayega.")
 
 
-def entry_form(db: Supabase, table: str, cols: list[dict]):
+def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = None):
+    """Nayi entry ka form.  edit={"id_col", "id", "row"} ho to wahi form purani entry badalne ke liye."""
     pics = photo_fields(table, cols)
     pic_cols = {f["col"] for f in pics}
     fields = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols]
 
     # Save ke baad form khaali karne ke liye har baar naye widget keys
-    ver_key = f"{table}_ver"
+    ver_key = f"{table}_ever" if edit else f"{table}_ver"
     ver = st.session_state.setdefault(ver_key, 0)
-    k = f"{table}_v{ver}"
+    k = f"{table}_e{edit['id']}_v{ver}" if edit else f"{table}_v{ver}"
+
+    # Edit: purani values form mein pehle se (sirf pehli baar)
+    if edit and not st.session_state.get(f"{k}_pref"):
+        for c in fields:
+            prefill_widget(c, f"{k}_{c['column_name']}", edit["row"].get(c["column_name"]))
+        st.session_state[f"{k}_pref"] = True
 
     # OCR se mila Machine No (box banne se pehle bharna zaroori hai)
     pend = st.session_state.pop(f"{k}_pending", None)
@@ -698,7 +738,7 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
             if col in meta:
                 set_widget(meta[col], f"{k}_{col}", v)
 
-    done = st.session_state.pop(f"{table}_done", None)
+    done = None if edit else st.session_state.pop(f"{table}_done", None)
     if done is not None:
         st.success("Entry Saved")
         if done:
@@ -746,6 +786,13 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         else:
             values[name] = input_for(by_name[name], f"{k}_{name}", label)
 
+    def pick_photo(f):
+        if edit:
+            cur = image_src(db, edit["row"].get(f["col"]))
+            if cur:
+                st.image(cur, caption="Abhi wali photo (nayi daalne par badlegi)", width=160)
+        return photo_picker(f["label"], f"{k}_{f['col']}")
+
     pending = []
 
     def flush():
@@ -760,7 +807,7 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
             flush()
             f = photo_before[name]
             st.markdown(f"#### 📷 {f['label']}")
-            uploads[f["col"]] = photo_picker(f["label"], f"{k}_{f['col']}")
+            uploads[f["col"]] = pick_photo(f)
             if uploads[f["col"]] is not None:
                 ocr_fill(uploads[f["col"]], ocr_groups[f["col"]], by_name, k, f["col"],
                          db, table, labels, cols[0]["column_name"])
@@ -772,16 +819,17 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         st.markdown(f"#### 📷 {PHOTOS.get(table, {}).get('heading', 'Photo')}")
         for colx, f in zip(st.columns(len(rest)), rest):
             with colx:
-                uploads[f["col"]] = photo_picker(f["label"], f"{k}_{f['col']}")
+                uploads[f["col"]] = pick_photo(f)
 
     # ---- Save button: dabate hi band (disabled) ho jata hai, double save nahi hoga
-    lock_key, err_key = f"{table}_saving", f"{table}_err"
+    lock_key = f"{table}_esaving" if edit else f"{table}_saving"
+    err_key = f"{table}_eerr" if edit else f"{table}_err"
     saving = st.session_state.get(lock_key, False)
 
     def _start_save():
         st.session_state[lock_key] = True
 
-    st.button("⏳ Save ho raha hai... Pls Wait" if saving else "💾 Save",
+    st.button("⏳ Save ho raha hai... Pls Wait" if saving else ("💾 Save Changes" if edit else "💾 Save"),
               type="primary", use_container_width=True, disabled=saving,
               on_click=_start_save, key=f"{k}_save")
     err = st.session_state.pop(err_key, None)
@@ -791,20 +839,25 @@ def entry_form(db: Supabase, table: str, cols: list[dict]):
         return
 
     try:
-        result = save_entry(db, table, fields, labels, pics, values, uploads)
+        result = save_entry(db, table, fields, labels, pics, values, uploads, edit=edit)
     finally:
         st.session_state[lock_key] = False
 
     if isinstance(result, str):                    # galti ka sandesh
         st.session_state[err_key] = result
+    elif edit:
+        st.session_state[f"{table}_edit_msg"] = f"✔ Entry Updated (id {edit['id']})"
+        st.session_state.pop(f"{table}_edit_id", None)     # edit band
+        st.session_state[ver_key] = ver + 1
     else:
         st.session_state[f"{table}_done"] = result
         st.session_state[ver_key] = ver + 1        # form khaali
     st.rerun()
 
 
-def save_entry(db, table, fields, labels, pics, values, uploads):
-    """Entry save karta hai. Safal hone par photo list, warna galti ka sandesh (str) lautata hai."""
+def save_entry(db, table, fields, labels, pics, values, uploads, edit=None):
+    """Entry save karta hai (edit ho to purani entry badalta hai).
+    Safal hone par photo list, warna galti ka sandesh (str) lautata hai."""
     any_photo = any(u is not None for u in uploads.values())
     row, req_missing = {}, []
     for c in fields:
@@ -815,7 +868,7 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
             return f"'{labels.get(name, pretty(name))}' ki value sahi nahi hai."
         if v is None and not c["is_nullable"] and not c["has_default"]:
             req_missing.append(labels.get(name, pretty(name)))
-        if v is not None:
+        if v is not None or edit:                  # edit: khaali kiya field database mein bhi khaali
             row[name] = v
     if req_missing:
         return "Ye fields bharna zaroori hai: " + ", ".join(req_missing)
@@ -826,7 +879,7 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
     rules = calc_rules(table, labels)
     auto_cols = {r["t_col"] for r in rules}
     filled = [n for n, v in row.items()
-              if n not in auto_cols and v is not False
+              if n not in auto_cols and v is not False and v is not None
               and not types.get(n, "").startswith(("date", "timestamp", "time"))]
     if not filled and not any_photo:
         return "Form is Empty ?"
@@ -847,7 +900,7 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
     fp = hashlib.md5(json.dumps([table, row, photo_sig], sort_keys=True, default=str)
                      .encode()).hexdigest()
     last = st.session_state.get(f"{table}_last_fp")
-    if last and last[0] == fp and _time.time() - last[1] < 120:
+    if not edit and last and last[0] == fp and _time.time() - last[1] < 120:
         return "⚠️ Ye entry abhi-abhi save ho chuki hai, isliye dobara save nahi ki gayi."
 
     try:
@@ -855,7 +908,13 @@ def save_entry(db, table, fields, labels, pics, values, uploads):
             for f in pics:
                 if uploads.get(f["col"]) is not None:
                     row[f["col"]] = save_image(db, uploads[f["col"]], f["folder"])
-            db.insert(table, row)
+            if edit:
+                changed = db.update(table, edit["id_col"], edit["id"], row)
+                if not changed:
+                    return ("❌ Entry update nahi hui – Supabase mein 'edit_permission.sql' "
+                            "chalayein (ek baar).")
+            else:
+                db.insert(table, row)
     except Exception as e:
         return f"❌ Save nahi hua: {e}"
 
@@ -905,11 +964,9 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     for f in pics:
         view[f["col"]] = view[f["col"]].map(lambda v: image_src(db, v))
         cfg[f["col"]] = st.column_config.ImageColumn(f["label"], width="small")
-    grid_kw = {}
-    if pics:
-        st.caption("👆 Kisi bhi row par click karke chunein – neeche us entry ki photo dekh / "
-                   "jod / badal sakte hain")
-        grid_kw = dict(on_select="rerun", selection_mode="single-row", key=f"{table}_grid")
+    st.caption("👆 Kisi bhi row par click karke chunein – phir ✏️ Edit dabayein"
+               + (" (ya neeche photo dekh / badal sakte hain)" if pics else ""))
+    grid_kw = dict(on_select="rerun", selection_mode="single-row", key=f"{table}_grid")
     try:
         ev = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg, **grid_kw)
     except TypeError:                                  # purana Streamlit: row chunna nahi
@@ -929,6 +986,9 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     csv = df.rename(columns={**all_labels, **{f["col"]: f["label"] for f in pics}})
     st.download_button("⬇️ Excel (CSV) download", csv.to_csv(index=False).encode("utf-8-sig"),
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
+
+    if edit_section(db, table, cols, df, rows, sel_rows):
+        return                                     # edit chal raha hai: neeche ka hissa chhupa
 
     if not pics:
         return
@@ -966,6 +1026,56 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.image(src, caption=title, use_container_width=True)
         if src.startswith("http"):
             st.markdown(f"[🔗 Photo poore size mein kholein]({src})")
+
+
+def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_rows: list) -> bool:
+    """Chuni hui row ke liye ✏️ Edit button aur edit form. Edit chal raha ho to True."""
+    id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
+    msg = st.session_state.pop(f"{table}_edit_msg", None)
+    if msg:
+        st.success(msg)
+    if not id_col or id_col not in df.columns:
+        return False
+    edit_key = f"{table}_edit_id"
+    if sel_rows and 0 <= sel_rows[0] < len(df):
+        gi = df.index[sel_rows[0]]
+        rid = int(df.at[gi, id_col])
+        summary = " | ".join(str(df.at[gi, c]) for c in list(df.columns)[:3])
+        c1, c2 = st.columns([1, 3])
+        if c1.button("✏️ Edit", type="primary", use_container_width=True, key=f"{table}_editbtn"):
+            st.session_state[edit_key] = rid
+        c2.markdown(f"Chuni hui entry: **{summary}**")
+    elif st.session_state.get(edit_key) is None:
+        st.caption("✏️ Edit ke liye upar table mein row par click karein.")
+
+    eid = st.session_state.get(edit_key)
+    if eid is None:
+        return False
+    raw = next((r for r in rows if str(r.get(id_col)) == str(eid)), None)
+    if raw is None:
+        try:
+            got = db.select(table, {"select": "*", id_col: f"eq.{eid}"})
+            raw = got[0] if got else None
+        except RuntimeError:
+            raw = None
+    if raw is None:
+        st.error(f"Entry id {eid} nahi mili.")
+        st.session_state.pop(edit_key, None)
+        return False
+
+    st.divider()
+    h1, h2 = st.columns([3, 1])
+    h1.subheader(f"✏️ Edit Entry – id {eid}")
+    if h2.button("✖ Cancel", use_container_width=True, key=f"{table}_editcancel"):
+        st.session_state.pop(edit_key, None)
+        st.rerun()
+    try:
+        box = st.container(border=True)
+    except TypeError:
+        box = st.container()
+    with box:
+        entry_form(db, table, cols, edit={"id_col": id_col, "id": eid, "row": raw})
+    return True
 
 
 def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict], expanded=False):
