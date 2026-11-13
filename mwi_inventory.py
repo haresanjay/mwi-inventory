@@ -1089,21 +1089,27 @@ def counter_summary(db, table: str, sc: dict):
             return None
         return int(round(pd.to_numeric(df[sc[key]], errors="coerce").sum()))
 
-    days = None
+    # Start Date = pehli Reading Date (IN), End Date = aakhri Reading Date (OUT)
+    # (sirf wo entries jinmein dono date hain);  Total Days = End - Start  (jod nahi)
+    days = start = end = None
     if sc.get("din") in df.columns and sc.get("dout") in df.columns:
-        # Total Days = jod nahi; pehli Reading Date (IN) se aakhri Reading Date (OUT) tak ke din
         din = pd.to_datetime(df[sc["din"]], errors="coerce")
         dout = pd.to_datetime(df[sc["dout"]], errors="coerce")
         both = din.notna() & dout.notna()
-        days = int((dout[both].max() - din[both].min()).days) if both.any() else 0
-    items = [("Total Days", days), ("Total In", total("tin")),
-             ("Total Out", total("tout")), ("Net Total", total("net"))]
-    items = [(n, v) for n, v in items if v is not None]
+        if both.any():
+            start, end = din[both].min(), dout[both].max()
+            days = int((end - start).days)
+    items = [("Total Days", f"{days:,}" if days is not None else "–"),
+             ("Start Date", start.strftime("%d-%m-%Y") if start is not None else "–"),
+             ("End Date", end.strftime("%d-%m-%Y") if end is not None else "–")]
+    out = total("net")                                   # Total Output = sab Net Total ka jod
+    if out is not None:
+        items.append(("Total Output", f"{out:,}"))
     st.markdown("**Grand Total**")
     cards = "".join(
         f'<div style="flex:1 1 140px;min-width:0;padding:8px 12px;border:1px solid rgba(128,128,128,.35);'
         f'border-radius:8px"><div style="font-size:.85rem;opacity:.75">{name}</div>'
-        f'<div style="font-size:1.35rem;font-weight:600;white-space:nowrap">{v:,}</div></div>'
+        f'<div style="font-size:1.35rem;font-weight:600;white-space:nowrap">{v}</div></div>'
         for name, v in items)
     st.markdown(f'<div style="display:flex;flex-wrap:wrap;gap:10px">{cards}</div>',
                 unsafe_allow_html=True)
