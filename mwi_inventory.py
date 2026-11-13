@@ -97,11 +97,7 @@ FIELD_ORDER = {
             F("Reading Date (IN)", ["reading_date_in", "date_in"], "Reading_Date_in", "date"),
             F("Counter No (IN)", ["counter_no_in", "counter_in"], "Counter_No_in", "text"),
             F("Total (IN)", ["total_in", "total_count_in", "count_in"], "Total_in", "bigint"),
-            F("Model (OUT)", ["model_out", "out_model"], "Model_out", "text"),
-            F("Serial Number (OUT)", ["serial_number_out", "serial_no_out", "serial_out"],
-              "Serial_Number_out", "text"),
             F("Reading Date (OUT)", ["reading_date_out", "date_out"], "Reading_Date_out", "date"),
-            F("Counter No (OUT)", ["counter_no_out", "counter_out"], "Counter_No_out", "text"),
             F("Total (OUT)", ["total_out", "total_count_out", "count_out"], "Total_out", "bigint"),
             F("Net Total", ["net_total", "net_count", "net"], "Net_Total", "bigint"),
         ],
@@ -161,8 +157,7 @@ OCR_MAP = {
             "model": "Model (IN)", "serial": "Serial Number (IN)", "date": "Reading Date (IN)",
             "counter": "Counter No (IN)", "total": "Total (IN)"},
         "machine_counter_out_photo_path": {
-            "model": "Model (OUT)", "serial": "Serial Number (OUT)", "date": "Reading Date (OUT)",
-            "counter": "Counter No (OUT)", "total": "Total (OUT)"},
+            "date": "Reading Date (OUT)", "total": "Total (OUT)"},
     },
 }
 OCR_NAMES = {"model": "Model", "serial": "Serial Number", "date": "Reading Date",
@@ -964,8 +959,6 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     for f in pics:
         view[f["col"]] = view[f["col"]].map(lambda v: image_src(db, v))
         cfg[f["col"]] = st.column_config.ImageColumn(f["label"], width="small")
-    st.caption("👆 Kisi bhi row par click karke chunein – phir ✏️ Edit dabayein"
-               + (" (ya neeche photo dekh / badal sakte hain)" if pics else ""))
     grid_kw = dict(on_select="rerun", selection_mode="single-row", key=f"{table}_grid")
     try:
         ev = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg, **grid_kw)
@@ -1044,7 +1037,7 @@ def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_row
         c1, c2 = st.columns([1, 3])
         if c1.button("✏️ Edit", type="primary", use_container_width=True, key=f"{table}_editbtn"):
             st.session_state[edit_key] = rid
-        c2.markdown(f"Chuni hui entry: **{summary}**")
+        c2.markdown(f"Selected Entry: **{summary}**")
     elif st.session_state.get(edit_key) is None:
         st.caption("✏️ Edit ke liye upar table mein row par click karein.")
 
