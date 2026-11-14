@@ -531,6 +531,52 @@ def set_widget(col: dict, key: str, value):
         ss[key] = str(value)
 
 
+MODIFY_NAMES = {"modifydate", "modifieddate", "modifiedat", "modifyat", "updatedat", "modificationdate",
+                "lastmodified", "modifydatetime"}
+
+
+def is_modify_col(name: str) -> bool:
+    """modify_date jaisa column (edit hone par apne-aap bharta hai, form mein box nahi)."""
+    return norm(name) in MODIFY_NAMES
+
+
+def modify_value(col: dict):
+    """Abhi ka samay (India) - column ke type ke hisaab se."""
+    now = now_ist().replace(microsecond=0)
+    dt = col["data_type"]
+    if dt == "timestamp with time zone":
+        return now.isoformat()
+    if dt.startswith("timestamp"):
+        return now.replace(tzinfo=None).isoformat()
+    if dt == "date":
+        return now.date().isoformat()
+    return now.strftime("%d-%m-%Y %I:%M %p")
+
+
+def _same(a, b) -> bool:
+    """Purani aur nayi value ek hi hai? (12 == 12.0, '2026-11-12' == date, tz ka farq nahi)"""
+    if a in (None, "") and b in (None, ""):
+        return True
+    if a is None or b is None:
+        return False
+    if isinstance(a, (list, dict)) or isinstance(b, (list, dict)):
+        return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
+    if str(a).strip() == str(b).strip():
+        return True
+    try:
+        if not isinstance(a, bool) and not isinstance(b, bool):
+            return float(a) == float(b)
+    except (TypeError, ValueError):
+        pass
+    try:
+        ta, tb = pd.to_datetime(str(a)), pd.to_datetime(str(b))
+        if (ta.tzinfo is None) != (tb.tzinfo is None):
+            return False
+        return ta == tb
+    except (ValueError, TypeError):
+        return False
+
+
 def prefill_widget(col: dict, key: str, raw):
     """Edit ke liye: database ki purani value ko form ke box mein pehle se bharta hai."""
     dt = col["data_type"]
@@ -543,7 +589,8 @@ def prefill_widget(col: dict, key: str, raw):
             if empty:
                 ss[key + "_d"], ss[key + "_t"] = None, None
             else:
-                d = pd.to_datetime(raw, utc=True).tz_convert(IST)
+                d = (pd.to_datetime(raw, utc=True).tz_convert(IST) if dt == "timestamp with time zone"
+                     else pd.to_datetime(raw))
                 ss[key + "_d"], ss[key + "_t"] = d.date(), d.time().replace(second=0, microsecond=0)
         elif dt.startswith("time"):
             ss[key] = None if empty else time.fromisoformat(str(raw)[:8])
@@ -736,7 +783,8 @@ def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = N
     """Nayi entry ka form.  edit={"id_col", "id", "row"} ho to wahi form purani entry badalne ke liye."""
     pics = photo_fields(table, cols)
     pic_cols = {f["col"] for f in pics}
-    fields = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols]
+    fields = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols
+              and not is_modify_col(c["column_name"])]
 
     # Save ke baad form khaali karne ke liye har baar naye widget keys
     ver_key = f"{table}_ever" if edit else f"{table}_ver"
@@ -856,7 +904,7 @@ def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = N
               on_click=_start_save, key=f"{k}_save")
     err = st.session_state.pop(err_key, None)
     if err:
-        st.error(err)
+        (st.info if err.startswith("ℹ️") else st.error)(err)
     if not saving:
         return
 
@@ -925,6 +973,15 @@ def save_entry(db, table, fields, labels, pics, values, uploads, edit=None):
     if not edit and last and last[0] == fp and _time.time() - last[1] < 120:
         return "⚠️ Ye entry abhi-abhi save ho chuki hai, isliye dobara save nahi ki gayi."
 
+    if edit:                                       # kuch badla hai ya nahi?
+        old = edit["row"]
+        changed_fields = [n for n, v in row.items() if not _same(old.get(n), v)]
+        if not changed_fields and not any_photo:
+            return "ℹ️ Koi badlav nahi – kuch save nahi kiya gaya"
+        mc = edit.get("mod_col")
+        if mc:
+            row[mc["column_name"]] = modify_value(mc)   # Modify Date + Time
+
     try:
         with st.spinner("Save ho raha hai... Pls Wait"):
             for f in pics:
@@ -968,9 +1025,12 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         if c["column_name"] in df.columns and is_whole(c):
             df[c["column_name"]] = pd.to_numeric(df[c["column_name"]], errors="coerce").round().astype("Int64")
     for c in cols:                         # UTC -> India ka samay
-        if c["data_type"].startswith("timestamp") and c["column_name"] in df.columns:
+        if c["data_type"] == "timestamp with time zone" and c["column_name"] in df.columns:
             t = pd.to_datetime(df[c["column_name"]], utc=True, errors="coerce")
             df[c["column_name"]] = t.dt.tz_convert(IST).dt.strftime("%d-%m-%Y %I:%M %p")
+        elif c["data_type"].startswith("timestamp") and c["column_name"] in df.columns:
+            t = pd.to_datetime(df[c["column_name"]], errors="coerce")        # pehle se India time
+            df[c["column_name"]] = t.dt.strftime("%d-%m-%Y %I:%M %p")
         elif c["data_type"] == "date" and c["column_name"] in df.columns:
             t = pd.to_datetime(df[c["column_name"]], errors="coerce")
             df[c["column_name"]] = t.dt.strftime("%d-%m-%Y")
@@ -979,11 +1039,16 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
 
     # columns ka kram: id -> form wale fields -> photos -> created_at
     auto = [c for c in cols if c["is_auto"]]
-    inputs = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols]
+    mods = [c["column_name"] for c in cols if is_modify_col(c["column_name"])]
+    inputs = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols
+              and c["column_name"] not in mods]
     ordered, labels, _ = arrange_fields(table, inputs)
-    order = ([c["column_name"] for c in auto if not c["data_type"].startswith("timestamp")]
+    order = ([c["column_name"] for c in auto if not c["data_type"].startswith("timestamp")
+              and c["column_name"] not in mods]
              + [n for n, _ in ordered] + pic_cols
-             + [c["column_name"] for c in auto if c["data_type"].startswith("timestamp")])
+             + [c["column_name"] for c in auto if c["data_type"].startswith("timestamp")
+                and c["column_name"] not in mods]
+             + mods)                       # Modify Date sabse aakhir mein (created_at ke baad)
     if days_col:                           # Net Days: Reading Date (OUT) ke theek baad
         at = order.index(sc["dout"]) + 1 if sc["dout"] in order else len(order)
         order.insert(at, days_col)
@@ -1198,7 +1263,8 @@ def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_row
     except TypeError:
         box = st.container()
     with box:
-        entry_form(db, table, cols, edit={"id_col": id_col, "id": eid, "row": raw})
+        mod_col = next((c for c in cols if is_modify_col(c["column_name"])), None)
+        entry_form(db, table, cols, edit={"id_col": id_col, "id": eid, "row": raw, "mod_col": mod_col})
     return True
 
 
