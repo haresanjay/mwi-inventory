@@ -126,12 +126,17 @@ FIELD_ORDER = {
         "first": [
             F("District Name", ["district_name", "district", "dist_name", "dist", "zila"],
               "District_Name", "text"),
-            F("Ac No", ["ac_no", "ac_number", "acno", "ac", "assembly_no", "assembly_constituency_no",
-                        "account_no"], "Ac_No", "text"),
             F("Ac Name", ["ac_name", "acname", "assembly_name", "ac_naam", "vidhan_sabha"],
               "Ac_Name", "text"),
-            F("Page Qty", ["page_qty", "pages_qty", "page_quantity", "no_of_pages", "no_of_page",
-                           "pages", "page", "total_pages", "page_count"], "Page_Qty", "integer"),
+            F("Ac No", ["ac_no", "ac_number", "acno", "ac", "assembly_no", "assembly_constituency_no",
+                        "account_no"], "Ac_No", "text"),
+            F("Total Parts", ["total_parts", "total_part", "parts", "no_of_parts", "part_qty"],
+              "Total_Parts", "integer"),
+            F("Total Pages", ["page_qty", "pages_qty", "page_quantity", "no_of_pages", "no_of_page",
+                              "pages", "page", "total_pages", "total_page", "page_count"], "Total_Page", "integer"),
+            F("Both Side", ["both_side", "bothside", "both_side_qty", "duplex"], "Both_Side", "integer"),
+            F("Single Side", ["single_side", "singleside", "single_side_qty", "simplex"],
+              "Single_Side", "integer"),
         ],
     },
     "Toner": {
@@ -1154,7 +1159,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
         "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
                         "bal": "Balance Paper Qty"},
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
-                       "page": "Page Qty"},
+                       "page": "Total Pages", "parts": "Total Parts", "both": "Both Side",
+                       "single": "Single Side"},
     }.get(table)
     if not want:
         return {}
@@ -1218,16 +1224,26 @@ def pdf_summary(db, table: str, sc: dict):
         return df[col].fillna("").astype(str).str.strip()
 
     page = _num(df, sc.get("page")).round().astype(int)
+
+    def given(key, default):
+        """Entry mein value bhari ho to wahi, warna default (ek part ka hisaab)."""
+        if sc.get(key) not in df.columns:
+            return default
+        v = pd.to_numeric(df[sc[key]], errors="coerce")
+        return v.where(v.notna(), default).round().astype(int)
+
     g = pd.DataFrame({
         "dist": clean(sc.get("dist")), "acno": clean(sc.get("acno")), "acname": clean(sc.get("acname")),
-        "page": page, "both": page // 2, "single": page % 2,
+        "page": page,
+        "parts": given("parts", pd.Series(1, index=df.index)),
+        "both": given("both", page // 2), "single": given("single", page % 2),
     })
     g["k_dist"] = g["dist"].str.upper()
     g["k_ac"] = g["acno"].str.upper().str.replace(r"\.0+$", "", regex=True).str.lstrip("0")
     groups = (g.groupby(["k_dist", "k_ac"], as_index=False, sort=False)
                .agg(dist=("dist", "first"), acno=("acno", "first"),
                     acname=("acname", lambda s: next((x for x in s if x), "")),
-                    parts=("page", "size"), pages=("page", "sum"),
+                    parts=("parts", "sum"), pages=("page", "sum"),
                     both=("both", "sum"), single=("single", "sum")))
     groups["_n"] = pd.to_numeric(groups["k_ac"], errors="coerce")
     groups = groups.sort_values(["k_dist", "_n", "k_ac"])
