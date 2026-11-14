@@ -128,6 +128,8 @@ FIELD_ORDER = {
               "District_Name", "text"),
             F("Ac No", ["ac_no", "ac_number", "acno", "ac", "assembly_no", "assembly_constituency_no",
                         "account_no"], "Ac_No", "text"),
+            F("Ac Name", ["ac_name", "acname", "assembly_name", "ac_naam", "vidhan_sabha"],
+              "Ac_Name", "text"),
             F("Page Qty", ["page_qty", "pages_qty", "page_quantity", "no_of_pages", "no_of_page",
                            "pages", "page", "total_pages", "page_count"], "Page_Qty", "integer"),
         ],
@@ -1099,7 +1101,8 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     st.download_button("⬇️ Excel (CSV) download", csv.to_csv(index=False).encode("utf-8-sig"),
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
     if sc:
-        counter_summary(db, table, sc)
+        {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
+         "PDF_DETAIL": pdf_summary}[table](db, table, sc)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
         return                                     # edit chal raha hai: neeche ka hissa chhupa
@@ -1143,16 +1146,101 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
 
 
 def summary_cols(table: str, cols: list[dict]) -> dict:
-    """Machine Counter ke Reading Date IN/OUT, Total IN/OUT, Net Total ke asli column naam."""
-    if table != "Machine_Counter":
+    """Grand Total ke liye zaroori columns ke asli naam (Machine Counter / Paper / PDF Detail)."""
+    want = {
+        "Machine_Counter": {"din": "Reading Date (IN)", "dout": "Reading Date (OUT)",
+                            "tin": "Total (IN)", "tout": "Total (OUT)",
+                            "net": "Net Total", "mach": "Machine No"},
+        "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
+                        "bal": "Balance Paper Qty"},
+        "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
+                       "page": "Page Qty"},
+    }.get(table)
+    if not want:
         return {}
     inputs = [c for c in cols if not c["is_auto"]]
     _, labels, _ = arrange_fields(table, inputs)
     by_label = {lbl: col for col, lbl in labels.items()}
-    out = {"din": by_label.get("Reading Date (IN)"), "dout": by_label.get("Reading Date (OUT)"),
-           "tin": by_label.get("Total (IN)"), "tout": by_label.get("Total (OUT)"),
-           "net": by_label.get("Net Total"), "mach": by_label.get("Machine No")}
+    out = {k: by_label.get(lbl) for k, lbl in want.items()}
     return {k: v for k, v in out.items() if v}
+
+
+def _card(name, v):
+    return (f'<div style="flex:1 1 130px;min-width:0;padding:8px 12px;border:1px solid '
+            f'rgba(128,128,128,.35);border-radius:8px"><div style="font-size:.85rem;opacity:.75">'
+            f'{name}</div><div style="font-size:1.35rem;font-weight:600;white-space:nowrap;'
+            f'overflow:hidden;text-overflow:ellipsis">{v}</div></div>')
+
+
+def _card_row(cards: list[tuple]) -> str:
+    return ('<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px">'
+            + "".join(_card(n, v) for n, v in cards) + "</div>")
+
+
+def _all_rows(db, table: str, sc: dict):
+    try:
+        rows = db.select(table, {"select": ",".join(sorted(set(sc.values()))), "limit": 100000})
+    except Exception as e:
+        st.caption(f"Total nahi nikal saka: {e}")
+        return None
+    df = pd.DataFrame(rows)
+    return None if df.empty else df
+
+
+def _num(df, col):
+    if not col or col not in df.columns:
+        return pd.Series(0, index=df.index, dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+
+def paper_summary(db, table: str, sc: dict):
+    """Paper: poori table ka No of Paper, Consumption Paper, Balance Paper Qty ka jod."""
+    df = _all_rows(db, table, sc)
+    if df is None:
+        return
+    st.markdown("**Grand Total**")
+    st.markdown(_card_row([
+        ("No of Paper", f"{int(round(_num(df, sc.get('nop')).sum())):,}"),
+        ("Consumption Paper", f"{int(round(_num(df, sc.get('cons')).sum())):,}"),
+        ("Balance Paper Qty", f"{int(round(_num(df, sc.get('bal')).sum())):,}"),
+    ]), unsafe_allow_html=True)
+
+
+def pdf_summary(db, table: str, sc: dict):
+    """PDF Detail: har District + AC ki alag row – Total Parts, Total Pages, Both Side, Single Side."""
+    df = _all_rows(db, table, sc)
+    if df is None:
+        return
+
+    def clean(col):
+        if not col or col not in df.columns:
+            return pd.Series("", index=df.index)
+        return df[col].fillna("").astype(str).str.strip()
+
+    page = _num(df, sc.get("page")).round().astype(int)
+    g = pd.DataFrame({
+        "dist": clean(sc.get("dist")), "acno": clean(sc.get("acno")), "acname": clean(sc.get("acname")),
+        "page": page, "both": page // 2, "single": page % 2,
+    })
+    g["k_dist"] = g["dist"].str.upper()
+    g["k_ac"] = g["acno"].str.upper().str.replace(r"\.0+$", "", regex=True).str.lstrip("0")
+    groups = (g.groupby(["k_dist", "k_ac"], as_index=False, sort=False)
+               .agg(dist=("dist", "first"), acno=("acno", "first"),
+                    acname=("acname", lambda s: next((x for x in s if x), "")),
+                    parts=("page", "size"), pages=("page", "sum"),
+                    both=("both", "sum"), single=("single", "sum")))
+    groups["_n"] = pd.to_numeric(groups["k_ac"], errors="coerce")
+    groups = groups.sort_values(["k_dist", "_n", "k_ac"])
+
+    st.markdown("**Grand Total**")
+    html = []
+    for r in groups.itertuples():
+        html.append(_card_row([
+            ("District Name", r.dist or "–"), ("Ac Name", r.acname or "–"), ("Ac No", r.acno or "–"),
+            ("Total Parts", f"{int(r.parts):,}"), ("Total Pages", f"{int(r.pages):,}"),
+            ("Both Side", f"{int(r.both):,}"), ("Single Side", f"{int(r.single):,}"),
+        ]))
+    st.markdown("".join(html), unsafe_allow_html=True)
 
 
 def counter_summary(db, table: str, sc: dict):
