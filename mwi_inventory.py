@@ -67,6 +67,20 @@ PHOTOS = {
              "button": "✨ New Parts Image", "title": "Naya Part (New)"},
         ],
     },
+    "Paper_Table": {
+        "heading": "Paper Photo", "item": "Entry",
+        "fields": [
+            {"col": "paper_photo_path", "label": "Paper Photo", "folder": "paper_photos",
+             "button": "📄 Paper Image", "title": "Paper Photo"},
+        ],
+    },
+    "Toner": {
+        "heading": "Toner Photo", "item": "Entry",
+        "fields": [
+            {"col": "toner_photo_path", "label": "Toner Photo", "folder": "toner_photos",
+             "button": "🖨️ Toner Image", "title": "Toner Photo"},
+        ],
+    },
     "Machine_Counter": {
         "heading": "Counter Photo", "item": "Entry",
         "fields": [
@@ -382,7 +396,9 @@ def input_for(col: dict, key: str, label: str | None = None):
     if dt == "boolean":
         return st.checkbox(label, key=key)
     if dt == "date":
-        dv = {} if key in st.session_state else {"value": now_ist().date()}
+        # "OUT" wali date (jaise Reading Date OUT) apne-aap aaj ki nahi bharegi - reading aane par bharein
+        today = None if "out" in name.lower() else now_ist().date()
+        dv = {} if key in st.session_state else {"value": today}
         return st.date_input(label, format="DD/MM/YYYY", key=key, **dv)
     if dt.startswith("timestamp"):
         c1, c2 = st.columns(2)
@@ -1170,7 +1186,7 @@ def counter_summary(db, table: str, sc: dict):
         "mach": (df[sc["mach"]].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
                  .str.replace(r"^M0*", "M", regex=True).where(df[sc["mach"]].notna())
                  if sc.get("mach") in df.columns else pd.Series(range(len(df)), index=df.index)),
-    }).dropna(subset=["start", "end"])
+    }).dropna(subset=["start", "end", "net"])        # sirf poori entries (IN aur OUT dono bhare)
     if g.empty:
         return
     groups = (g.groupby(["start", "end"], as_index=False)
