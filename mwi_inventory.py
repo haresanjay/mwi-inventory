@@ -1156,13 +1156,16 @@ def counter_summary(db, table: str, sc: dict):
         return int(round(pd.to_numeric(df[sc[key]], errors="coerce").sum()))
 
     # Har alag avadhi (Reading Date IN -> Reading Date OUT) ki alag row:
-    # Total Days = End - Start,  Total Output = us avadhi ki entries ke Net Total ka jod
+    # Total Days = End - Start,  Total Output = us avadhi ka (Total OUT - Total IN)
     if sc.get("din") not in df.columns or sc.get("dout") not in df.columns:
         return
     g = pd.DataFrame({
         "start": pd.to_datetime(df[sc["din"]], errors="coerce"),
         "end": pd.to_datetime(df[sc["dout"]], errors="coerce"),
-        "net": pd.to_numeric(df[sc["net"]], errors="coerce") if sc.get("net") in df.columns else 0,
+        # Total Output = Total OUT - Total IN  (sirf wo entries jinmein dono hain)
+        "net": (pd.to_numeric(df[sc["tout"]], errors="coerce") - pd.to_numeric(df[sc["tin"]], errors="coerce"))
+               if sc.get("tout") in df.columns and sc.get("tin") in df.columns
+               else (pd.to_numeric(df[sc["net"]], errors="coerce") if sc.get("net") in df.columns else 0),
         # Machine No ek jaisa likhne ke liye: M-1, m1, M01 = M1
         "mach": (df[sc["mach"]].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
                  .str.replace(r"^M0*", "M", regex=True).where(df[sc["mach"]].notna())
