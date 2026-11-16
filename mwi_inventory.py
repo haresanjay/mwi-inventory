@@ -101,8 +101,12 @@ FIELD_ORDER = {
     "Machine_Parts": {
         "first": [
             F("Machine No", ["machine_no", "machine_number", "mc_no", "machine"], "Machine_No", "text"),
+            F("Sr No", ["sr_no", "srno", "s_no", "sno", "serial_no", "sr"], "Sr_No", "integer"),
             F("Parts Name", ["parts_name", "part_name", "item_name", "name", "parts"], "Parts_Name", "text"),
+            F("Model Number", ["model_number", "model_no", "model", "modelno"], "Model_Number", "text"),
             F("Qty", ["qty", "quantity"], "Qty", "integer"),
+            F("Price", ["price", "rate", "unit_price"], "Price", "numeric"),
+            F("Total Value", ["total_value", "total_amount", "amount", "value", "total"], "Total_Value", "numeric"),
         ],
     },
     "Machine_Counter": {
@@ -202,6 +206,10 @@ CALC = {
     "Machine_Counter": [
         {"target": "Net Total", "uses": ["Total (OUT)", "Total (IN)"], "fn": _both_minus,
          "desc": "Total OUT − Total IN", "no_negative": True},
+    ],
+    "Machine_Parts": [
+        {"target": "Total Value", "uses": ["Qty", "Price"], "fn": lambda q, p: None if q is None or p is None else q * p,
+         "desc": "Qty × Price"},
     ],
     "Toner": [
         {"target": "Toner Balance Qty", "uses": ["Toner Qty", "Toner Used"], "fn": _minus,
