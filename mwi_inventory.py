@@ -1222,8 +1222,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
 def _card(name, v):
     return (f'<div style="flex:1 1 130px;min-width:0;padding:8px 12px;border:1px solid '
             f'rgba(128,128,128,.35);border-radius:8px"><div style="font-size:.85rem;opacity:.75">'
-            f'{name}</div><div style="font-size:1.35rem;font-weight:600;white-space:nowrap;'
-            f'overflow:hidden;text-overflow:ellipsis">{v}</div></div>')
+            f'{name}</div><div style="font-size:clamp(1rem,1.6vw,1.35rem);font-weight:600;'
+            f'overflow-wrap:anywhere;line-height:1.3">{v}</div></div>')
 
 
 def _card_row(cards: list[tuple]) -> str:
