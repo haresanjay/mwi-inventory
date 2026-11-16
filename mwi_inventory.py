@@ -335,6 +335,17 @@ class Supabase:
         return self._check(requests.get(self.base + table, headers=self.h,
                                         params=params, timeout=20))
 
+    def select_all(self, table: str, params: dict, page: int = 1000):
+        """Saari entries – Supabase ek baar mein 1000 tak deta hai, isliye 1000-1000 karke laata hai."""
+        params = {k: v for k, v in params.items() if k != "limit"}
+        out, start = [], 0
+        while True:
+            got = self.select(table, {**params, "limit": page, "offset": start})
+            out.extend(got)
+            if len(got) < page:
+                return out
+            start += page
+
     def update(self, table: str, id_col: str, id_val, row: dict):
         """Ek entry (id se) badalta hai. Badli hui rows lautata hai ([] = permission nahi/entry nahi)."""
         h = {**self.h, "Prefer": "return=representation"}
@@ -1035,15 +1046,14 @@ def save_entry(db, table, fields, labels, pics, values, uploads, edit=None):
 # ------------------------------------------------------------------ records + images
 def records_view(db: Supabase, table: str, cols: list[dict]):
     first = cols[0]["column_name"]
-    limit = st.select_slider("Show Entries", [10, 25, 50, 100, 500], value=25,
-                             key=f"{table}_limit")
-    try:
-        rows = db.select(table, {"select": "*", "order": f"{first}.desc", "limit": limit})
+    try:                                   # saari entries (koi limit nahi)
+        rows = db.select_all(table, {"select": "*", "order": f"{first}.desc"})
     except RuntimeError:
-        rows = db.select(table, {"select": "*", "limit": limit})
+        rows = db.select_all(table, {"select": "*"})
     if not rows:
         st.info("Empty Entry ?")
         return
+    st.caption(f"Total Entries: {len(rows):,}")
     df = pd.DataFrame(rows)
     sc = summary_cols(table, cols)         # Machine Counter: dates / totals ke columns
     days_col = None
@@ -1193,7 +1203,7 @@ def _card_row(cards: list[tuple]) -> str:
 
 def _all_rows(db, table: str, sc: dict):
     try:
-        rows = db.select(table, {"select": ",".join(sorted(set(sc.values()))), "limit": 100000})
+        rows = db.select_all(table, {"select": ",".join(sorted(set(sc.values())))})
     except Exception as e:
         st.caption(f"Total nahi nikal saka: {e}")
         return None
@@ -1270,7 +1280,7 @@ def pdf_summary(db, table: str, sc: dict):
 def counter_summary(db, table: str, sc: dict):
     """CSV download ke neeche: poori Machine_Counter table ka jod."""
     try:
-        rows = db.select(table, {"select": ",".join(sorted(set(sc.values()))), "limit": 100000})
+        rows = db.select_all(table, {"select": ",".join(sorted(set(sc.values())))})
     except Exception as e:
         st.caption(f"Total nahi nikal saka: {e}")
         return
