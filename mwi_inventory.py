@@ -366,6 +366,14 @@ class Supabase:
         return self._check(requests.post(self.base + table, headers=h,
                                          json=row, timeout=20))
 
+    def insert_many(self, table: str, rows: list[dict], chunk: int = 500):
+        """Bahut saari entries ek saath (500-500 karke)."""
+        h = {**self.h, "Prefer": "return=minimal,missing=default"}
+        for i in range(0, len(rows), chunk):
+            self._check(requests.post(self.base + table, headers=h,
+                                      params={"columns": ",".join(sorted({k for r in rows for k in r}))},
+                                      json=rows[i:i + chunk], timeout=60))
+
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_columns(url: str, key: str, table: str) -> list[dict]:
@@ -1556,6 +1564,234 @@ def login_gate() -> bool:
     return False
 
 
+# ------------------------------------------------------------------ Excel upload
+# Excel mein ye field na ho / formula ka jawab na ho to apne-aap (sirf khaali hone par)
+UPLOAD_FILL = {
+    "PDF_DETAIL": [
+        ("Both Side", "Total Pages", lambda p: int(p) // 2),
+        ("Single Side", "Total Pages", lambda p: int(p) % 2),
+        ("Total Parts", "Total Pages", lambda p: 1),
+    ],
+}
+SKIP_ROW_RE = re.compile(r"^\s*(grand\s*total|total\s*parts|total|kul|note)\b", re.I)
+
+
+def upload_columns(table: str, cols: list[dict]) -> list[dict]:
+    """Excel se bhare ja sakne wale columns (id/created_at/photo/modify chhod kar)."""
+    pics = {f["col"] for f in photo_fields(table, cols)}
+    return [c for c in cols if not c["is_auto"] and c["column_name"] not in pics
+            and not is_modify_col(c["column_name"])]
+
+
+def header_map(table: str, fields: list[dict]) -> dict:
+    """Excel ke heading (norm) -> table ka column."""
+    _, labels, _ = arrange_fields(table, fields)
+    names = {c["column_name"] for c in fields}
+    m = {}
+    for c in fields:
+        m.setdefault(norm(c["column_name"]), c["column_name"])
+        m.setdefault(norm(pretty(c["column_name"])), c["column_name"])
+    for spec in FIELD_ORDER.get(table, {}).get("first", []) + FIELD_ORDER.get(table, {}).get("last", []):
+        col = next((cc for cc, lbl in labels.items() if lbl == spec["label"]), None)
+        if col in names:
+            for a in [spec["label"], spec["sql"]] + spec["aliases"]:
+                m.setdefault(norm(a), col)
+    return m
+
+
+def read_sheet(data: bytes, name: str) -> list[list]:
+    """Excel / CSV ki saari lines (formula ho to Excel ka nikala hua jawab)."""
+    if name.lower().endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(data), header=None, dtype=object, keep_default_na=False)
+        return df.values.tolist()
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    ws = wb.worksheets[0]
+    return [list(r) for r in ws.iter_rows(values_only=True)]
+
+
+def upload_value(col: dict, v):
+    """Excel ki value -> database ki value (khaali = None)."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    dt = col["data_type"]
+    if isinstance(v, str):
+        v = v.strip()
+        if v == "" or v.startswith("="):
+            return None
+    if dt == "date":
+        if isinstance(v, datetime):
+            return v.date().isoformat()
+        if isinstance(v, date):
+            return v.isoformat()
+        t = pd.to_datetime(str(v), dayfirst=True, errors="coerce")
+        return None if pd.isna(t) else t.date().isoformat()
+    if dt.startswith("timestamp"):
+        if isinstance(v, (datetime, date)):
+            return v.isoformat()
+        t = pd.to_datetime(str(v), dayfirst=True, errors="coerce")
+        return None if pd.isna(t) else t.isoformat()
+    if is_whole(col) or dt in NUM_TYPES:
+        try:
+            f = float(str(v).replace(",", "").replace("₹", "").strip())
+        except ValueError:
+            raise ValueError(f"'{v}' number nahi hai")
+        return int(round(f)) if is_whole(col) else f
+    if dt == "boolean":
+        return str(v).strip().lower() in ("1", "true", "yes", "haan", "y")
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v) if dt in ("text", "character varying", "character") else v
+
+
+def _key(v):
+    if v is None:
+        return ""
+    try:
+        return repr(round(float(v), 4))
+    except (TypeError, ValueError):
+        return str(v).strip().lower()
+
+
+def excel_upload(db, table: str, cols: list[dict]):
+    """Excel / CSV upload -> jo heading table ke field se milein, wo bhar kar entries daalo."""
+    ver = st.session_state.setdefault(f"{table}_upver", 0)
+    msg = st.session_state.pop(f"{table}_upmsg", None)
+    if msg:
+        (st.error if msg.startswith("❌") else st.success)(msg)
+    up = st.file_uploader("Excel / CSV file chunein", type=["xlsx", "xlsm", "csv"], key=f"{table}_up{ver}")
+    if up is None:
+        return
+    fields = upload_columns(table, cols)
+    meta = {c["column_name"]: c for c in fields}
+    hm = header_map(table, fields)
+    try:
+        lines = read_sheet(up.getvalue(), up.name)
+    except Exception as e:
+        st.error(f"❌ File nahi padh saka: {e}")
+        return
+
+    # Heading wali line: jismein sabse zyada table ke field milein (pehli 25 lines mein)
+    best, hrow = 0, None
+    for i, line in enumerate(lines[:25]):
+        hits = len({hm[norm(x)] for x in line if x is not None and norm(x) in hm})
+        if hits > best:
+            best, hrow = hits, i
+    if hrow is None:
+        st.error("❌ Is Excel ki koi heading is table ke kisi field se nahi mili.")
+        return
+    colmap = {}                                      # excel column index -> table column
+    for j, x in enumerate(lines[hrow]):
+        if x is not None and norm(x) in hm and hm[norm(x)] not in colmap.values():
+            colmap[j] = hm[norm(x)]
+    _, labels, _ = arrange_fields(table, fields)
+    lbl = lambda c: labels.get(c, pretty(c))
+    st.caption("Excel ki heading → Table ka field:  " + ",  ".join(
+        f"**{lines[hrow][j]}** → {lbl(c)}" for j, c in colmap.items()))
+
+    # Jo field Excel mein nahi hain: sabhi lines mein ek jaisi value (optional)
+    fixed = {}
+    others = [c for c in fields if c["column_name"] not in colmap.values()]
+    if others:
+        with st.expander("Jo field Excel mein nahi hain – sabhi entries mein ek jaisi value (optional)"):
+            ocols = st.columns(2)
+            for n, c in enumerate(others):
+                k = f"{table}_upfix{ver}_{c['column_name']}"
+                with ocols[n % 2]:
+                    if c["data_type"] == "date":
+                        v = st.date_input(lbl(c["column_name"]), value=None, format="DD/MM/YYYY", key=k)
+                    elif is_whole(c) or c["data_type"] in NUM_TYPES:
+                        v = st.number_input(lbl(c["column_name"]), value=None, key=k)
+                    else:
+                        v = st.text_input(lbl(c["column_name"]), key=k)
+                if v not in (None, ""):
+                    fixed[c["column_name"]] = upload_value(c, v)
+
+    # Lines -> entries
+    rules = calc_rules(table, labels)
+    by_label = {l: c for c, l in labels.items()}
+    fills = [(by_label.get(t), by_label.get(u), fn) for t, u, fn in UPLOAD_FILL.get(table, [])]
+    rows, bad = [], []
+    for i, line in enumerate(lines[hrow + 1:], hrow + 2):
+        texts = [x for x in line if isinstance(x, str) and x.strip()]
+        if any(SKIP_ROW_RE.match(x) for x in texts):
+            continue                                 # TOTAL / Note wali line
+        row, errs = {}, []
+        for j, c in colmap.items():
+            try:
+                v = upload_value(meta[c], line[j] if j < len(line) else None)
+            except ValueError as e:
+                errs.append(f"{lbl(c)}: {e}")
+                continue
+            if v is not None:
+                row[c] = v
+        # aadhe se kam field bhare = entry nahi (khaali / Note / jod-ghatav wali line)
+        if len(row) + len(errs) < max(2, (len(colmap) + 1) // 2):
+            continue
+        if errs:
+            bad.append(f"Line {i}: " + "; ".join(errs))
+            continue
+        row = {**fixed, **row}
+        for t, u, fn in fills:                       # khaali ho tabhi
+            if t and u and row.get(t) is None and row.get(u) is not None:
+                row[t] = fn(row[u])
+        types = {c["column_name"]: c["data_type"] for c in fields}
+        for r in rules:
+            if row.get(r["t_col"]) is None:
+                res = run_rule(r, row, types)
+                if res is not None:
+                    row[r["t_col"]] = res
+        miss = [lbl(c["column_name"]) for c in fields
+                if not c["is_nullable"] and not c["has_default"] and row.get(c["column_name"]) is None]
+        if miss:
+            bad.append(f"Line {i}: zaroori field khaali – {', '.join(miss)}")
+            continue
+        rows.append(row)
+
+    if not rows:
+        st.warning("Is Excel mein daalne layak koi entry nahi mili.")
+        for b in bad[:20]:
+            st.caption("⚠️ " + b)
+        return
+
+    # Pehle se maujood bilkul wahi entries chhod do
+    use = sorted({k for r in rows for k in r}, key=lambda c: list(meta).index(c))
+    try:
+        have = db.select_all(table, {"select": ",".join(use)})
+    except Exception:
+        have = []
+    seen = {tuple(_key(h.get(c)) for c in use) for h in have}
+    new = [r for r in rows if tuple(_key(r.get(c)) for c in use) not in seen]
+    dup = len(rows) - len(new)
+
+    st.markdown(f"**Excel mein entries: {len(rows):,}**  |  nayi: **{len(new):,}**"
+                + (f"  |  pehle se hain (nahi dalengi): **{dup:,}**" if dup else ""))
+    if bad:
+        with st.expander(f"⚠️ {len(bad)} line(s) chhodi gayi"):
+            for b in bad[:200]:
+                st.caption(b)
+    if new:
+        st.dataframe(pd.DataFrame(new)[use].rename(columns=lbl).head(500),
+                     use_container_width=True, hide_index=True)
+    if not new:
+        st.info("Sabhi entries pehle se table mein hain.")
+        return
+    lock = f"{table}_uplock"
+    if st.button(f"📥 {len(new):,} Entries Insert", type="primary",
+                 disabled=st.session_state.get(lock, False), key=f"{table}_upgo{ver}",
+                 on_click=lambda: st.session_state.__setitem__(lock, True)):
+        try:
+            with st.spinner("Entries daal raha hai... Pls Wait"):
+                db.insert_many(table, new)
+            st.session_state[f"{table}_upmsg"] = f"✔ {len(new):,} entries daal di gayi"
+            st.session_state[f"{table}_upver"] = ver + 1
+            st.session_state[f"{table}_gver"] = st.session_state.get(f"{table}_gver", 0) + 1
+        except Exception as e:
+            st.session_state[f"{table}_upmsg"] = f"❌ Insert nahi hua: {e}"
+        st.session_state[lock] = False
+        st.rerun()
+
+
 def main():
     st.set_page_config(page_title="MWI Inventory", page_icon="📦", layout="wide")
     st.title("📦 MWI Print – Inventory")
@@ -1591,10 +1827,12 @@ def main():
                 st.error(f"Table '{table}' nahi mila. Naam check karein.")
                 continue
 
-            mode = st.radio("Kya karna hai?", ["➕ New Entry", "📋 Entries Show"],
+            mode = st.radio("Kya karna hai?", ["➕ New Entry", "📋 Entries Show", "📥 Excel Upload"],
                             horizontal=True, key=f"{table}_mode", label_visibility="collapsed")
             if mode.startswith("➕"):
                 entry_form(db, table, cols)
+            elif mode.startswith("📥"):
+                excel_upload(db, table, cols)
             else:
                 try:
                     records_view(db, table, cols)
