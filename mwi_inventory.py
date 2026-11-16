@@ -176,6 +176,14 @@ FIELD_ORDER = {
             F("Balance Paper Qty", ["balance_paper_qty", "balance_paper", "paper_balance",
                                     "paper_balance_qty", "balance_qty", "balance"],
               "Balance_Paper_Qty", "integer"),
+            F("Item (Invoice)", ["item_invoice", "item_invoice_par", "item", "item_name", "description"],
+              "Item_Invoice", "text"),
+            F("GSM Kg (Weight/Ream)", ["gsm_kg", "weight_ream_kg", "weight_ream", "kg_ream", "kg_per_ream",
+                                       "weight_per_ream"], "GSM_Kg", "numeric"),
+            F("Rate", ["rate", "rate_ream", "rate_per_ream", "rate_rs"], "Rate", "numeric"),
+            F("Invoice Total (GST)", ["invoice_total_gst", "invoice_total", "invoice_total_rs_gst_sahit",
+                                      "invoice_total_gst_sahit", "bill_total", "total_gst"],
+              "Invoice_Total_GST", "numeric"),
         ],
     },
 }
@@ -524,7 +532,7 @@ def photo_fields(table: str, cols: list[dict]) -> list[dict]:
     known = {f["col"] for f in out}
     for c in cols:                       # naya photo column bina config ke bhi chalega
         n = c["column_name"]
-        if n not in known and n.lower().endswith(("photo_path", "pic_path")):
+        if n not in known and n.lower().endswith(("photo_path", "pic_path", "_photo", "_pic")):
             out.append({"col": n, "label": pretty(n.replace("_Path", "").replace("_path", "")),
                         "folder": n.lower().replace("_path", ""), "button": "🖼️ " + pretty(n),
                         "title": pretty(n)})
@@ -1653,8 +1661,19 @@ def _key(v):
         return str(v).strip().lower()
 
 
+# Excel ki entry kis purani entry ki "wahi entry" hai – in field se pehchaan (label)
+UPLOAD_KEYS = {
+    "Paper_Table": ["Invoice No", "Paper Company", "Qty Rim"],
+    "Toner": ["Invoice No", "Toner Qty"],
+    "PDF_DETAIL": ["Ac No", "Part No"],
+    "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
+    "Machine_Counter": ["Machine No", "Reading Date (IN)"],
+}
+PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
+
+
 def excel_upload(db, table: str, cols: list[dict]):
-    """Excel / CSV upload -> jo heading table ke field se milein, wo bhar kar entries daalo."""
+    """Excel / CSV upload: nayi entry daalo, wahi entry pehle se ho to sirf badli/khaali value update karo."""
     ver = st.session_state.setdefault(f"{table}_upver", 0)
     msg = st.session_state.pop(f"{table}_upmsg", None)
     if msg:
@@ -1665,13 +1684,19 @@ def excel_upload(db, table: str, cols: list[dict]):
     fields = upload_columns(table, cols)
     meta = {c["column_name"]: c for c in fields}
     hm = header_map(table, fields)
+    pics = photo_fields(table, cols)
+    pic_hdr = {}                                     # norm(heading) -> photo field
+    for f in pics:                                   # pehle asli column naam, phir label
+        pic_hdr.setdefault(norm(f["col"]), f)
+    for f in pics:
+        for a in (f["label"], f["title"], pretty(f["col"])) + PHOTO_HEADERS:
+            pic_hdr.setdefault(norm(a), f)
     try:
         lines = read_sheet(up.getvalue(), up.name)
     except Exception as e:
         st.error(f"❌ File nahi padh saka: {e}")
         return
 
-    # Heading wali line: jismein sabse zyada table ke field milein (pehli 25 lines mein)
     best, hrow = 0, None
     for i, line in enumerate(lines[:25]):
         hits = len({hm[norm(x)] for x in line if x is not None and norm(x) in hm})
@@ -1680,16 +1705,27 @@ def excel_upload(db, table: str, cols: list[dict]):
     if hrow is None:
         st.error("❌ Is Excel ki koi heading is table ke kisi field se nahi mili.")
         return
-    colmap = {}                                      # excel column index -> table column
+    colmap, photo_col = {}, {}                       # excel index -> column / photo field
     for j, x in enumerate(lines[hrow]):
-        if x is not None and norm(x) in hm and hm[norm(x)] not in colmap.values():
-            colmap[j] = hm[norm(x)]
+        if x is None:
+            continue
+        n = norm(x)
+        if n in hm and hm[n] not in colmap.values():
+            colmap[j] = hm[n]
+        elif n in pic_hdr and pic_hdr[n]["col"] not in [f["col"] for f in photo_col.values()]:
+            photo_col[j] = pic_hdr[n]
     _, labels, _ = arrange_fields(table, fields)
     lbl = lambda c: labels.get(c, pretty(c))
     st.caption("Excel ki heading → Table ka field:  " + ",  ".join(
-        f"**{lines[hrow][j]}** → {lbl(c)}" for j, c in colmap.items()))
+        [f"**{lines[hrow][j]}** → {lbl(c)}" for j, c in colmap.items()]
+        + [f"**{lines[hrow][j]}** → {f['label']} (photo)" for j, f in photo_col.items()]))
 
-    # Jo field Excel mein nahi hain: sabhi lines mein ek jaisi value (optional)
+    photos = {}
+    if photo_col:
+        ups = st.file_uploader("Photos (optional) – Excel mein likhe naam wali photos yahan chunein",
+                               type=IMG_TYPES, accept_multiple_files=True, key=f"{table}_upph{ver}")
+        photos = {Path(u.name).name.lower(): u for u in (ups if isinstance(ups, list) else [])}
+
     fixed = {}
     others = [c for c in fields if c["column_name"] not in colmap.values()]
     if others:
@@ -1707,15 +1743,15 @@ def excel_upload(db, table: str, cols: list[dict]):
                 if v not in (None, ""):
                     fixed[c["column_name"]] = upload_value(c, v)
 
-    # Lines -> entries
     rules = calc_rules(table, labels)
     by_label = {l: c for c, l in labels.items()}
     fills = [(by_label.get(t), by_label.get(u), fn) for t, u, fn in UPLOAD_FILL.get(table, [])]
-    rows, bad = [], []
+    types = {c["column_name"]: c["data_type"] for c in fields}
+    rows, bad = [], []                               # (row, {photo col: file name})
     for i, line in enumerate(lines[hrow + 1:], hrow + 2):
         texts = [x for x in line if isinstance(x, str) and x.strip()]
         if any(SKIP_ROW_RE.match(x) for x in texts):
-            continue                                 # TOTAL / Note wali line
+            continue
         row, errs = {}, []
         for j, c in colmap.items():
             try:
@@ -1725,28 +1761,26 @@ def excel_upload(db, table: str, cols: list[dict]):
                 continue
             if v is not None:
                 row[c] = v
-        # aadhe se kam field bhare = entry nahi (khaali / Note / jod-ghatav wali line)
         if len(row) + len(errs) < max(2, (len(colmap) + 1) // 2):
             continue
         if errs:
             bad.append(f"Line {i}: " + "; ".join(errs))
             continue
         row = {**fixed, **row}
-        for t, u, fn in fills:                       # khaali ho tabhi
+        for t, u, fn in fills:
             if t and u and row.get(t) is None and row.get(u) is not None:
                 row[t] = fn(row[u])
-        types = {c["column_name"]: c["data_type"] for c in fields}
         for r in rules:
             if row.get(r["t_col"]) is None:
                 res = run_rule(r, row, types)
                 if res is not None:
                     row[r["t_col"]] = res
-        miss = [lbl(c["column_name"]) for c in fields
-                if not c["is_nullable"] and not c["has_default"] and row.get(c["column_name"]) is None]
-        if miss:
-            bad.append(f"Line {i}: zaroori field khaali – {', '.join(miss)}")
-            continue
-        rows.append(row)
+        pf = {}
+        for j, f in photo_col.items():
+            v = line[j] if j < len(line) else None
+            if v is not None and str(v).strip():
+                pf[f["col"]] = str(v).strip()
+        rows.append((row, pf))
 
     if not rows:
         st.warning("Is Excel mein daalne layak koi entry nahi mili.")
@@ -1754,41 +1788,126 @@ def excel_upload(db, table: str, cols: list[dict]):
             st.caption("⚠️ " + b)
         return
 
-    # Pehle se maujood bilkul wahi entries chhod do
-    use = sorted({k for r in rows for k in r}, key=lambda c: list(meta).index(c))
+    # Purani entries se milaan
+    id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
+    key_cols = [by_label.get(k) for k in UPLOAD_KEYS.get(table, [])]
+    key_cols = [k for k in key_cols if k]
+    use_keys = id_col and key_cols and all(any(k in r for r, _ in rows) for k in key_cols)
     try:
-        have = db.select_all(table, {"select": ",".join(use)})
+        have = db.select_all(table, {"select": "*"})
     except Exception:
         have = []
-    seen = {tuple(_key(h.get(c)) for c in use) for h in have}
-    new = [r for r in rows if tuple(_key(r.get(c)) for c in use) not in seen]
-    dup = len(rows) - len(new)
+    idx = {}
+    if use_keys:
+        for h in have:
+            idx.setdefault(tuple(_key(h.get(k)) for k in key_cols), h)
+    else:
+        allc = sorted({k for r, _ in rows for k in r}, key=lambda c: list(meta).index(c))
+        seen = {tuple(_key(h.get(c)) for c in allc) for h in have}
 
-    st.markdown(f"**Excel mein entries: {len(rows):,}**  |  nayi: **{len(new):,}**"
-                + (f"  |  pehle se hain (nahi dalengi): **{dup:,}**" if dup else ""))
+    overwrite = st.checkbox("Purani entry mein pehle se bhari value bhi Excel ke hisaab se badlein "
+                            "(band ho to sirf khaali field bharenge)", value=False, key=f"{table}_upow{ver}")
+    calc_t = {r["t_col"] for r in rules} | {t for t, u, fn in fills if t}
+    mod = next((c for c in cols if is_modify_col(c["column_name"])), None)
+    new, upd, same, missing_ph = [], [], 0, set()
+    for row, pf in rows:
+        old = idx.get(tuple(_key(row.get(k)) for k in key_cols)) if use_keys else None
+        if not use_keys and tuple(_key(row.get(c)) for c in allc) in seen:
+            same += 1
+            continue
+        ph = {}
+        for c, name in pf.items():
+            if name.startswith("http"):
+                ph[c] = name
+            elif Path(name).name.lower() in photos:
+                ph[c] = photos[Path(name).name.lower()]
+            elif not (old and old.get(c)):
+                missing_ph.add(Path(name).name)
+        if old is None:
+            new.append((row, ph))
+            continue
+        empty = lambda v: v is None or (isinstance(v, str) and not v.strip())
+        diff = {c: v for c, v in row.items() if c not in calc_t and not _same(old.get(c), v)
+                and (overwrite or empty(old.get(c)))}
+        if diff:                                     # hisaab wale field purani + nayi value se dobara
+            merged = {**old, **diff}
+            for r in rules:
+                res = run_rule(r, merged, types)
+                if res is not None:
+                    merged[r["t_col"]] = res
+            for t, u, fn in fills:
+                if t and u and empty(merged.get(t)) and merged.get(u) is not None:
+                    merged[t] = fn(merged[u])
+            diff.update({c: merged[c] for c in calc_t if c in merged and not _same(old.get(c), merged[c])})
+        ph = {c: v for c, v in ph.items()
+              if not (isinstance(v, str) and _same(old.get(c), v)) and (overwrite or empty(old.get(c)))}
+        if diff or ph:
+            upd.append((old, diff, ph))
+        else:
+            same += 1
+
+    st.markdown(f"**Excel mein entries: {len(rows):,}**  |  nayi: **{len(new):,}**  |  "
+                f"update: **{len(upd):,}**  |  pehle jaisi (kuch nahi badla): **{same:,}**")
     if bad:
         with st.expander(f"⚠️ {len(bad)} line(s) chhodi gayi"):
             for b in bad[:200]:
                 st.caption(b)
+    if missing_ph:
+        st.caption(f"📷 {len(missing_ph)} photo upar 'Photos' mein nahi chuni gayi (bina photo jayengi): "
+                   + ", ".join(sorted(missing_ph)[:10]) + (" …" if len(missing_ph) > 10 else ""))
     if new:
-        st.dataframe(pd.DataFrame(new)[use].rename(columns=lbl).head(500),
+        st.markdown("**➕ Nayi entries**")
+        show = sorted({k for r, _ in new for k in r}, key=lambda c: list(meta).index(c))
+        st.dataframe(pd.DataFrame([r for r, _ in new])[show].rename(columns=lbl).head(500),
                      use_container_width=True, hide_index=True)
-    if not new:
-        st.info("Sabhi entries pehle se table mein hain.")
+    if upd:
+        st.markdown("**✏️ Update hongi (sirf badli / khaali value)**")
+        st.dataframe(pd.DataFrame([
+            {**{lbl(k): o.get(k) for k in key_cols},
+             "Badlav": ",  ".join([f"{lbl(c)}: {o.get(c) if o.get(c) not in (None, '') else '–'} → {v}"
+                                   for c, v in d.items()]
+                                  + [f"{c}: photo" for c in p])}
+            for o, d, p in upd[:500]]), use_container_width=True, hide_index=True)
+    if not new and not upd:
+        st.info("Sabhi entries pehle se table mein hain – kuch nahi badla.")
         return
+
     go = f"{table}_upgo_flag"
-    st.button(f"📥 {len(new):,} Entries Insert", type="primary", key=f"{table}_upgo{ver}",
+    st.button(f"📥 {len(new):,} Insert + {len(upd):,} Update", type="primary", key=f"{table}_upgo{ver}",
               on_click=lambda: st.session_state.__setitem__(go, True))
-    if st.session_state.pop(go, False):
-        try:
-            with st.spinner("Entries daal raha hai... Pls Wait"):
-                db.insert_many(table, new)
-            st.session_state[f"{table}_upmsg"] = f"✔ {len(new):,} entries daal di gayi"
-            st.session_state[f"{table}_upver"] = ver + 1
-            st.session_state[f"{table}_gver"] = st.session_state.get(f"{table}_gver", 0) + 1
-        except Exception as e:
-            st.session_state[f"{table}_upmsg"] = f"❌ Insert nahi hua: {e}"
-        st.rerun()
+    if not st.session_state.pop(go, False):
+        return
+    folder = {f["col"]: f["folder"] for f in pics}
+    done_i = done_u = fail_u = 0
+    try:
+        with st.spinner("Save ho raha hai... Pls Wait"):
+            ins = []
+            for row, ph in new:
+                for c, v in ph.items():
+                    row[c] = v if isinstance(v, str) else save_image(db, v, folder[c])
+                ins.append(row)
+            if ins:
+                db.insert_many(table, ins)
+                done_i = len(ins)
+            for old, diff, ph in upd:
+                for c, v in ph.items():
+                    diff[c] = v if isinstance(v, str) else save_image(db, v, folder[c])
+                if mod:
+                    diff[mod["column_name"]] = modify_value(mod)
+                if db.update(table, id_col, old[id_col], diff):
+                    done_u += 1
+                else:
+                    fail_u += 1
+        m = f"✔ {done_i:,} nayi entries daali, {done_u:,} entries update ki"
+        if fail_u:
+            m = (f"❌ {fail_u} entries update nahi hui – Supabase mein 'edit_permission.sql' chalayein. "
+                 f"({done_i} daali, {done_u} update hui)")
+        st.session_state[f"{table}_upmsg"] = m
+        st.session_state[f"{table}_upver"] = ver + 1
+        st.session_state[f"{table}_gver"] = st.session_state.get(f"{table}_gver", 0) + 1
+    except Exception as e:
+        st.session_state[f"{table}_upmsg"] = f"❌ Save nahi hua ({done_i} daali, {done_u} update hui): {e}"
+    st.rerun()
 
 
 def main():
