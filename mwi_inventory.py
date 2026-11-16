@@ -134,6 +134,7 @@ FIELD_ORDER = {
               "Ac_Name", "text"),
             F("Ac No", ["ac_no", "ac_number", "acno", "ac", "assembly_no", "assembly_constituency_no",
                         "account_no"], "Ac_No", "text"),
+            F("Part No", ["part_no", "part_number", "partno", "part"], "Part_No", "integer"),
             F("Total Parts", ["total_parts", "total_part", "parts", "no_of_parts", "part_qty"],
               "Total_Parts", "integer"),
             F("Total Pages", ["page_qty", "pages_qty", "page_quantity", "no_of_pages", "no_of_page",
@@ -258,7 +259,7 @@ NUM_TYPES = {"numeric", "real", "double precision", "money"}
 
 # numeric column hone par bhi in naamon wale fields poore ank (bina .00) mein dikhte hain
 WHOLE_WORDS = ("total", "counter", "count", "page", "gsm", "noof", "qty", "used", "balance",
-               "consumption", "reading", "srno", "sno", "serialno", "acno", "parts", "side", "price")
+               "consumption", "reading", "srno", "sno", "serialno", "acno", "parts", "partno", "side", "price")
 DECIMAL_WORDS = ("rim", "ream", "rate", "amount", "weight", "kg")
 
 
