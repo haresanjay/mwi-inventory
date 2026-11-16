@@ -1306,8 +1306,9 @@ def pdf_summary(db, table: str, sc: dict):
     for r in groups.itertuples():
         html.append(_card_row([
             ("District Name", r.dist or "–"), ("Ac Name", r.acname or "–"), ("Ac No", r.acno or "–"),
-            ("Total Parts", f"{int(r.parts):,}"), ("Total Pages", f"{int(r.pages):,}"),
+            ("Total Parts", f"{int(r.parts):,}"), ("Total Side Print", f"{int(r.pages):,}"),
             ("Both Side", f"{int(r.both):,}"), ("Single Side", f"{int(r.single):,}"),
+            ("Total Used Paper Sheet (Both + Single)", f"{int(r.both) + int(r.single):,}"),
         ]))
     st.markdown("".join(html), unsafe_allow_html=True)
 
