@@ -54,6 +54,7 @@ TABLES = {
     "PDF_DETAIL": "📑 PDF Detail",
     "Paper_Table": "📄 Paper",
     "Toner": "🖨️ Toner",
+    "Attendance": "🕘 Attendance",
 }
 
 # Kis table ke kis column mein photo aayegi (column naam chhote/bade akshar se farq nahi padta)
@@ -164,6 +165,19 @@ FIELD_ORDER = {
                                       "amount_with_gst", "total_gst", "bill_total"], "Invoice_Total_GST", "numeric"),
         ],
     },
+    "Attendance": {
+        "first": [
+            F("Employee ID", ["employee_id", "emp_id", "employeeid", "empid"], "Employee_ID", "integer"),
+            F("Card No", ["card_no", "card_number", "cardno"], "Card_No", "text"),
+            F("Name", ["name", "employee_name", "emp_name"], "Name", "text"),
+            F("Department", ["department", "dept"], "Department", "text"),
+            F("Date", ["att_date", "attendance_date", "date", "work_date"], "Att_Date", "date"),
+            F("In Time", ["in_time", "intime", "sw", "start_work", "check_in"], "In_Time", "time"),
+            F("Out Time", ["out_time", "outtime", "ew", "end_work", "check_out"], "Out_Time", "time"),
+            F("Work Hours", ["work_hours", "working_hours", "hours", "total_hours"], "Work_Hours", "numeric"),
+            F("Status", ["status", "remark"], "Status", "text"),
+        ],
+    },
     "Paper_Table": {
         "first": [
             F("Paper Received Date", ["paper_received_date", "paper_receive_date", "received_date",
@@ -242,6 +256,38 @@ CALC = {
 }
 
 
+def _hhmm(v):
+    """'10:20', '10:20:00', time(10,20) -> minute ginti (na ho to None)."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, time):
+        return v.hour * 60 + v.minute
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})", str(v))
+    return int(m[1]) * 60 + int(m[2]) if m else None
+
+
+def _work_hours(t_in, t_out):
+    a, b = _hhmm(t_in), _hhmm(t_out)
+    if a is None or b is None or b < a:
+        return None
+    return round((b - a) / 60, 2)
+
+
+def _att_status(t_in, t_out):
+    a, b = _hhmm(t_in), _hhmm(t_out)
+    if a is not None and b is not None:
+        return "Present"
+    if a is not None:
+        return "Out Missing"
+    return "In Missing" if b is not None else None
+
+
+CALC["Attendance"] = [
+    {"target": "Work Hours", "uses": ["In Time", "Out Time"], "fn": _work_hours, "desc": "Out Time − In Time"},
+    {"target": "Status", "uses": ["In Time", "Out Time"], "fn": _att_status, "desc": "In / Out se"},
+]
+
+
 def calc_rules(table: str, labels: dict) -> list[dict]:
     """CALC ke labels ko asli column naam se jodta hai (sirf wahi niyam jinke column maujood hain)."""
     by_label = {lbl: col for col, lbl in labels.items()}
@@ -261,7 +307,7 @@ def run_rule(rule: dict, values: dict, types: dict):
     res = rule["fn"](*args)
     if res is None:
         return None
-    if types.get(rule["t_col"]) in INT_TYPES:
+    if types.get(rule["t_col"]) in INT_TYPES and isinstance(res, (int, float)):
         res = int(round(res))
     return res
 
@@ -1153,7 +1199,8 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
     if sc:
         {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
-         "PDF_DETAIL": pdf_summary, "Toner": toner_summary}[table](db, table, sc)
+         "PDF_DETAIL": pdf_summary, "Toner": toner_summary,
+         "Attendance": attendance_summary}[table](db, table, sc)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
         return                                     # edit chal raha hai: neeche ka hissa chhupa
@@ -1204,6 +1251,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
                             "net": "Net Total", "mach": "Machine No"},
         "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
                         "bal": "Balance Paper Qty"},
+        "Attendance": {"emp": "Employee ID", "name": "Name", "date": "Date", "hours": "Work Hours",
+                       "status": "Status", "tin": "In Time", "tout": "Out Time"},
         "Toner": {"qty": "Toner Qty", "used": "Toner Used", "bal": "Toner Balance Qty",
                   "rate": "Rate", "amt": "Amount", "gst": "Invoice Total (GST)", "inv": "Invoice No"},
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
@@ -1258,6 +1307,32 @@ def paper_summary(db, table: str, sc: dict):
         ("Consumption Paper", f"{int(round(_num(df, sc.get('cons')).sum())):,}"),
         ("Balance Paper Qty", f"{int(round(_num(df, sc.get('bal')).sum())):,}"),
     ]), unsafe_allow_html=True)
+
+
+def attendance_summary(db, table: str, sc: dict):
+    """Attendance: har mahine, har karmchari – kitne din aaya, kul ghante, Out Missing."""
+    df = _all_rows(db, table, sc)
+    if df is None or sc.get("date") not in df.columns:
+        return
+    d = pd.to_datetime(df[sc["date"]], errors="coerce")
+    g = pd.DataFrame({
+        "Month": d.dt.strftime("%m-%Y"),
+        "Employee ID": df[sc["emp"]] if sc.get("emp") in df.columns else "",
+        "Name": df[sc["name"]] if sc.get("name") in df.columns else "",
+        "hours": _num(df, sc.get("hours")),
+        "present": df[sc["status"]].eq("Present") if sc.get("status") in df.columns else True,
+        "miss": df[sc["status"]].isin(["Out Missing", "In Missing"]) if sc.get("status") in df.columns else False,
+    }).dropna(subset=["Month"])
+    if g.empty:
+        return
+    t = (g.groupby(["Month", "Employee ID", "Name"], as_index=False, dropna=False)
+          .agg(**{"Aaye (din)": ("hours", "size"), "Present (In+Out)": ("present", "sum"),
+                  "Punch Missing": ("miss", "sum"), "Kul Ghante": ("hours", "sum")}))
+    t["Kul Ghante"] = t["Kul Ghante"].round(2)
+    t["_m"] = pd.to_datetime(t["Month"], format="%m-%Y")
+    t = t.sort_values(["_m", "Employee ID"], ascending=[False, True]).drop(columns="_m")
+    st.markdown("**Grand Total (mahina-wise, karmchari-wise)**")
+    st.dataframe(t, use_container_width=True, hide_index=True)
 
 
 def toner_summary(db, table: str, sc: dict):
@@ -1664,10 +1739,54 @@ def read_sheet(data: bytes, name: str) -> list[list]:
     if name.lower().endswith(".csv"):
         df = pd.read_csv(io.BytesIO(data), header=None, dtype=object, keep_default_na=False)
         return df.values.tolist()
+    if name.lower().endswith(".xls"):                # purana Excel (jaise attendance machine ka)
+        df = pd.read_excel(io.BytesIO(data), header=None, dtype=object, engine="xlrd")
+        return [[None if (isinstance(x, float) and pd.isna(x)) else x for x in r] for r in df.values.tolist()]
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
     ws = wb.worksheets[0]
     return [list(r) for r in ws.iter_rows(values_only=True)]
+
+
+_TIME_RE = re.compile(r"(\d{1,2}:\d{2}|--:--)\s+(\d{1,2}:\d{2}|--:--)")
+
+
+def machine_attendance(lines: list[list]) -> list[list] | None:
+    """Attendance machine ki report (karmchari x din, har cell 'SW EW') ko
+    har karmchari-har din ki ek line mein badalta hai. Machine wali report na ho to None."""
+    hrow = next((i for i, l in enumerate(lines[:15])
+                 if any(norm(x) == "employeeid" for x in l if x is not None)), None)
+    if hrow is None:
+        return None
+    head = lines[hrow]
+    pos = {norm(x): j for j, x in enumerate(head) if x is not None}
+    days = []
+    for j, x in enumerate(head):
+        if x is None:
+            continue
+        d = x if isinstance(x, (date, datetime)) else pd.to_datetime(str(x), format="%Y/%m/%d", errors="coerce")
+        if d is not None and not pd.isna(d):
+            days.append((j, pd.Timestamp(d).date()))
+    if not days:
+        return None
+    out = [["Employee ID", "Card No", "Name", "Department", "Date", "In Time", "Out Time",
+            "Work Hours", "Status"]]
+    get = lambda l, k: l[pos[k]] if k in pos and pos[k] < len(l) else None
+    for l in lines[hrow + 1:]:
+        emp = get(l, "employeeid")
+        if emp is None or not re.match(r"^\s*\d+(\.0)?\s*$", str(emp)):
+            continue                                 # 'SW - EW' wali line ya khaali
+        for j, d in days:
+            cell = str(l[j]) if j < len(l) and l[j] is not None else ""
+            ins = [a for a, b in _TIME_RE.findall(cell) if a != "--:--"]
+            outs = [b for a, b in _TIME_RE.findall(cell) if b != "--:--"]
+            if not ins and not outs:
+                continue                             # us din koi punch nahi
+            t_in = ins[0] if ins else None
+            t_out = outs[-1] if outs else None
+            out.append([int(float(emp)), get(l, "cardno"), get(l, "name"), get(l, "department"), d,
+                        t_in, t_out, _work_hours(t_in, t_out), _att_status(t_in, t_out)])
+    return out
 
 
 def upload_value(col: dict, v):
@@ -1686,6 +1805,13 @@ def upload_value(col: dict, v):
             return v.isoformat()
         t = pd.to_datetime(str(v), dayfirst=True, errors="coerce")
         return None if pd.isna(t) else t.date().isoformat()
+    if dt.startswith("time") and not dt.startswith("timestamp"):
+        if isinstance(v, time):
+            return v.strftime("%H:%M:%S")
+        if isinstance(v, datetime):
+            return v.strftime("%H:%M:%S")
+        m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?", str(v))
+        return f"{int(m[1]):02d}:{m[2]}:{m[3] or '00'}" if m else None
     if dt.startswith("timestamp"):
         if isinstance(v, (datetime, date)):
             return v.isoformat()
@@ -1720,6 +1846,7 @@ UPLOAD_KEYS = {
     "PDF_DETAIL": ["Ac No", "Part No"],
     "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
     "Machine_Counter": ["Machine No", "Reading Date (IN)"],
+    "Attendance": ["Employee ID", "Date"],
 }
 PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
 
@@ -1730,7 +1857,7 @@ def excel_upload(db, table: str, cols: list[dict]):
     msg = st.session_state.pop(f"{table}_upmsg", None)
     if msg:
         (st.error if msg.startswith("❌") else st.success)(msg)
-    up = st.file_uploader("Excel / CSV file chunein", type=["xlsx", "xlsm", "csv"], key=f"{table}_up{ver}")
+    up = st.file_uploader("Excel / CSV file chunein", type=["xlsx", "xlsm", "xls", "csv"], key=f"{table}_up{ver}")
     if up is None:
         return
     fields = upload_columns(table, cols)
@@ -1748,6 +1875,12 @@ def excel_upload(db, table: str, cols: list[dict]):
     except Exception as e:
         st.error(f"❌ File nahi padh saka: {e}")
         return
+    if table == "Attendance":
+        conv = machine_attendance(lines)
+        if conv is not None:
+            st.caption(f"🕘 Attendance machine ki report mili – {len(conv) - 1} din-wise entries banayi "
+                       "(jis din koi punch nahi, wo chhoda).")
+            lines = conv
 
     best, hrow = 0, None
     for i, line in enumerate(lines[:25]):
