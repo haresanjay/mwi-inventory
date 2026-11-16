@@ -157,6 +157,11 @@ FIELD_ORDER = {
             F("Toner Used", ["toner_used", "used", "used_qty", "toner_use"], "Toner_Used", "integer"),
             F("Toner Balance Qty", ["toner_balance_qty", "toner_balance", "balance_qty", "balance"],
               "Toner_Balance_Qty", "integer"),
+            F("Party Name", ["party_name", "party", "supplier", "supplier_name"], "Party_Name", "text"),
+            F("Rate", ["rate", "rate_rs", "rate_per_pkt", "rate_bina_gst", "rate_rs_bina_gst"], "Rate", "numeric"),
+            F("Amount", ["amount", "amount_rs", "toner_amount"], "Amount", "numeric"),
+            F("Invoice Total (GST)", ["invoice_total_gst", "invoice_total", "invoice_total_rs_gst_sahit",
+                                      "amount_with_gst", "total_gst", "bill_total"], "Invoice_Total_GST", "numeric"),
         ],
     },
     "Paper_Table": {
@@ -225,6 +230,8 @@ CALC = {
     "Toner": [
         {"target": "Toner Balance Qty", "uses": ["Toner Qty", "Toner Used"], "fn": _minus,
          "desc": "Toner Qty − Toner Used", "no_negative": True},
+        {"target": "Amount", "uses": ["Toner Qty", "Rate"],
+         "fn": lambda q, r: None if q is None or r is None else round(q * r, 2), "desc": "Toner Qty × Rate"},
     ],
     "Paper_Table": [
         {"target": "No of Paper", "uses": ["Qty Rim"], "fn": lambda rim: rim * 500,
@@ -1197,7 +1204,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
                             "net": "Net Total", "mach": "Machine No"},
         "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
                         "bal": "Balance Paper Qty"},
-        "Toner": {"qty": "Toner Qty", "used": "Toner Used", "bal": "Toner Balance Qty"},
+        "Toner": {"qty": "Toner Qty", "used": "Toner Used", "bal": "Toner Balance Qty",
+                  "rate": "Rate", "amt": "Amount", "gst": "Invoice Total (GST)", "inv": "Invoice No"},
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
                        "page": "Total Pages", "parts": "Total Parts", "both": "Both Side",
                        "single": "Single Side"},
@@ -1257,12 +1265,41 @@ def toner_summary(db, table: str, sc: dict):
     df = _all_rows(db, table, sc)
     if df is None:
         return
-    st.markdown("**Grand Total**")
-    st.markdown(_card_row([
+    def money(v):                                    # Indian tarika: ₹ 1,21,381.36
+        neg, v = v < 0, abs(round(v, 2))
+        whole, paise = divmod(round(v * 100), 100)
+        w = str(int(whole))
+        if len(w) > 3:
+            head, tail = w[:-3], w[-3:]
+            head = ",".join([head[max(0, i - 2):i] for i in range(len(head), 0, -2)][::-1])
+            w = head + "," + tail
+        return ("-" if neg else "") + "₹ " + w + (f".{int(paise):02d}" if paise else "")
+    cards = [
         ("Toner Qty", f"{int(round(_num(df, sc.get('qty')).sum())):,}"),
         ("Toner Used", f"{int(round(_num(df, sc.get('used')).sum())):,}"),
         ("Toner Balance Qty", f"{int(round(_num(df, sc.get('bal')).sum())):,}"),
-    ]), unsafe_allow_html=True)
+    ]
+    if sc.get("amt") in df.columns:
+        cards.append(("Amount", money(_num(df, sc["amt"]).sum())))
+    if sc.get("gst") in df.columns:
+        cards.append(("Amount with GST", money(_num(df, sc["gst"]).sum())))
+    st.markdown("**Grand Total**")
+    st.markdown(_card_row(cards), unsafe_allow_html=True)
+
+    # Toner Qty × Rate = Amount  milaan
+    if sc.get("amt") in df.columns and sc.get("rate") in df.columns and sc.get("qty") in df.columns:
+        q = pd.to_numeric(df[sc["qty"]], errors="coerce")
+        r = pd.to_numeric(df[sc["rate"]], errors="coerce")
+        a = pd.to_numeric(df[sc["amt"]], errors="coerce")
+        has = q.notna() & r.notna()
+        bad = has & ((q * r - a.fillna(0)).abs() > 0.5)
+        if bad.any():
+            inv = df[sc["inv"]] if sc.get("inv") in df.columns else pd.Series(df.index, index=df.index)
+            st.warning("⚠️ Toner Qty × Rate, Amount se nahi mil raha: " + ",  ".join(
+                f"{inv[i]} ({q[i]:g} × {r[i]:g} = {q[i] * r[i]:,.2f}, Amount {0 if pd.isna(a[i]) else a[i]:,.2f})"
+                for i in df.index[bad][:20]))
+        elif has.any():
+            st.caption(f"✔ Sabhi {int(has.sum())} entries mein Toner Qty × Rate = Amount mil raha hai.")
 
 
 def pdf_summary(db, table: str, sc: dict):
