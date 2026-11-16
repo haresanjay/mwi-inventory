@@ -258,8 +258,8 @@ NUM_TYPES = {"numeric", "real", "double precision", "money"}
 
 # numeric column hone par bhi in naamon wale fields poore ank (bina .00) mein dikhte hain
 WHOLE_WORDS = ("total", "counter", "count", "page", "gsm", "noof", "qty", "used", "balance",
-               "consumption", "reading")
-DECIMAL_WORDS = ("rim", "ream", "rate", "price", "amount", "weight", "kg")
+               "consumption", "reading", "srno", "sno", "serialno", "acno", "parts", "side", "price")
+DECIMAL_WORDS = ("rim", "ream", "rate", "amount", "weight", "kg")
 
 
 def is_whole(col: dict) -> bool:
