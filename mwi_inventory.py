@@ -1776,10 +1776,10 @@ def excel_upload(db, table: str, cols: list[dict]):
     if not new:
         st.info("Sabhi entries pehle se table mein hain.")
         return
-    lock = f"{table}_uplock"
-    if st.button(f"📥 {len(new):,} Entries Insert", type="primary",
-                 disabled=st.session_state.get(lock, False), key=f"{table}_upgo{ver}",
-                 on_click=lambda: st.session_state.__setitem__(lock, True)):
+    go = f"{table}_upgo_flag"
+    st.button(f"📥 {len(new):,} Entries Insert", type="primary", key=f"{table}_upgo{ver}",
+              on_click=lambda: st.session_state.__setitem__(go, True))
+    if st.session_state.pop(go, False):
         try:
             with st.spinner("Entries daal raha hai... Pls Wait"):
                 db.insert_many(table, new)
@@ -1788,7 +1788,6 @@ def excel_upload(db, table: str, cols: list[dict]):
             st.session_state[f"{table}_gver"] = st.session_state.get(f"{table}_gver", 0) + 1
         except Exception as e:
             st.session_state[f"{table}_upmsg"] = f"❌ Insert nahi hua: {e}"
-        st.session_state[lock] = False
         st.rerun()
 
 
