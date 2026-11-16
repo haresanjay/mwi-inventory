@@ -1321,17 +1321,18 @@ def attendance_summary(db, table: str, sc: dict):
         "Name": df[sc["name"]] if sc.get("name") in df.columns else "",
         "hours": _num(df, sc.get("hours")),
         "present": df[sc["status"]].eq("Present") if sc.get("status") in df.columns else True,
-        "miss": df[sc["status"]].isin(["Out Missing", "In Missing"]) if sc.get("status") in df.columns else False,
+        "miss": df[sc["status"]].eq("Out Missing") if sc.get("status") in df.columns else False,
     }).dropna(subset=["Month"])
     if g.empty:
         return
     t = (g.groupby(["Month", "Employee ID", "Name"], as_index=False, dropna=False)
-          .agg(**{"Aaye (din)": ("hours", "size"), "Present (In+Out)": ("present", "sum"),
-                  "Punch Missing": ("miss", "sum"), "Kul Ghante": ("hours", "sum")}))
-    t["Kul Ghante"] = t["Kul Ghante"].round(2)
+          .agg(**{"Days In": ("hours", "size"), "Present (In+Out)": ("present", "sum"),
+                  "Out Missing": ("miss", "sum"), "Total Hours": ("hours", "sum")}))
+    t["Total Hours"] = t["Total Hours"].round(2)
     t["_m"] = pd.to_datetime(t["Month"], format="%m-%Y")
-    t = t.sort_values(["_m", "Employee ID"], ascending=[False, True]).drop(columns="_m")
-    st.markdown("**Grand Total (mahina-wise, karmchari-wise)**")
+    t = (t.sort_values(["_m", "Employee ID"], ascending=[False, True])
+          [["Month", "Name", "Days In", "Present (In+Out)", "Out Missing", "Total Hours"]])
+    st.markdown("**Grand Total**")
     st.dataframe(t, use_container_width=True, hide_index=True)
 
 
