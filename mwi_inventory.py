@@ -1146,7 +1146,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
     if sc:
         {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
-         "PDF_DETAIL": pdf_summary}[table](db, table, sc)
+         "PDF_DETAIL": pdf_summary, "Toner": toner_summary}[table](db, table, sc)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
         return                                     # edit chal raha hai: neeche ka hissa chhupa
@@ -1197,6 +1197,7 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
                             "net": "Net Total", "mach": "Machine No"},
         "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
                         "bal": "Balance Paper Qty"},
+        "Toner": {"qty": "Toner Qty", "used": "Toner Used", "bal": "Toner Balance Qty"},
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
                        "page": "Total Pages", "parts": "Total Parts", "both": "Both Side",
                        "single": "Single Side"},
@@ -1248,6 +1249,19 @@ def paper_summary(db, table: str, sc: dict):
         ("No of Paper", f"{int(round(_num(df, sc.get('nop')).sum())):,}"),
         ("Consumption Paper", f"{int(round(_num(df, sc.get('cons')).sum())):,}"),
         ("Balance Paper Qty", f"{int(round(_num(df, sc.get('bal')).sum())):,}"),
+    ]), unsafe_allow_html=True)
+
+
+def toner_summary(db, table: str, sc: dict):
+    """Toner: poori table ka Toner Qty, Toner Used, Toner Balance Qty ka jod."""
+    df = _all_rows(db, table, sc)
+    if df is None:
+        return
+    st.markdown("**Grand Total**")
+    st.markdown(_card_row([
+        ("Toner Qty", f"{int(round(_num(df, sc.get('qty')).sum())):,}"),
+        ("Toner Used", f"{int(round(_num(df, sc.get('used')).sum())):,}"),
+        ("Toner Balance Qty", f"{int(round(_num(df, sc.get('bal')).sum())):,}"),
     ]), unsafe_allow_html=True)
 
 
