@@ -834,7 +834,9 @@ def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = N
     k = f"{table}_e{edit['id']}_v{ver}" if edit else f"{table}_v{ver}"
 
     # Edit: purani values form mein pehle se (sirf pehli baar)
-    if edit and not st.session_state.get(f"{k}_pref"):
+    # (Streamlit chhupe hue form ke box mita deta hai – box na mile to dobara bharo)
+    if edit and (not st.session_state.get(f"{k}_pref")
+                 or not any(f"{k}_{c['column_name']}" in st.session_state for c in fields)):
         for c in fields:
             prefill_widget(c, f"{k}_{c['column_name']}", edit["row"].get(c["column_name"]))
         st.session_state[f"{k}_pref"] = True
@@ -1352,6 +1354,7 @@ def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_row
         c1, c2, c3 = st.columns([1, 1, 3])
         if c1.button("✏️ Edit", type="primary", use_container_width=True, key=f"{table}_editbtn"):
             st.session_state[edit_key] = rid
+            st.session_state[f"{table}_ever"] = st.session_state.get(f"{table}_ever", 0) + 1  # naya form
             st.session_state.pop(del_key, None)
         if c2.button("🗑️ Delete", use_container_width=True, key=f"{table}_delbtn"):
             st.session_state[del_key] = rid
