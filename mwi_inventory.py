@@ -134,6 +134,8 @@ FIELD_ORDER = {
               "Ac_Name", "text"),
             F("Ac No", ["ac_no", "ac_number", "acno", "ac", "assembly_no", "assembly_constituency_no",
                         "account_no"], "Ac_No", "text"),
+            F("PDF File Name", ["pdf_file_name", "pdf_filename", "file_name", "filename", "pdf_name",
+                                "pdf_file"], "PDF_File_Name", "text"),
             F("Part No", ["part_no", "part_number", "partno", "part"], "Part_No", "integer"),
             F("Total Parts", ["total_parts", "total_part", "parts", "no_of_parts", "part_qty"],
               "Total_Parts", "integer"),
