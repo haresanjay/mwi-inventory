@@ -85,10 +85,12 @@ PHOTOS = {
     "Machine_Counter": {
         "heading": "Counter Photo", "item": "Entry",
         "fields": [
-            {"col": "machine_counter_in_photo_path", "label": "Counter IN Photo",
-             "folder": "counter_in", "button": "📥 Counter IN Image", "title": "Counter IN"},
-            {"col": "machine_counter_out_photo_path", "label": "Counter OUT Photo",
-             "folder": "counter_out", "button": "📤 Counter OUT Image", "title": "Counter OUT"},
+            {"col": "machine_counter_in_photo_path", "label": "Counter Start Photo",
+             "alts": ["counter_start_photo", "counter_start_photo_path"],
+             "folder": "counter_in", "button": "📥 Counter Start Image", "title": "Counter Start"},
+            {"col": "machine_counter_out_photo_path", "label": "Counter Closed Photo",
+             "alts": ["counter_closed_photo", "counter_closed_photo_path"],
+             "folder": "counter_out", "button": "📤 Counter Closed Image", "title": "Counter Closed"},
         ],
     },
 }
@@ -111,17 +113,22 @@ FIELD_ORDER = {
         ],
     },
     "Machine_Counter": {
+        "hide": ["counter_no_in", "counter_in", "counter_no"],   # form / list mein nahi dikhega
         "first": [
             F("Machine No", ["machine_no", "machine_number", "mc_no", "machine"], "Machine_No", "text"),
-            F("Model (IN)", ["model_in", "in_model"], "Model_in", "text"),
-            F("Serial Number (IN)", ["serial_number_in", "serial_no_in", "serial_in"],
-              "Serial_Number_in", "text"),
-            F("Reading Date (IN)", ["reading_date_in", "date_in"], "Reading_Date_in", "date"),
-            F("Counter No (IN)", ["counter_no_in", "counter_in"], "Counter_No_in", "text"),
-            F("Total (IN)", ["total_in", "total_count_in", "count_in"], "Total_in", "bigint"),
-            F("Reading Date (OUT)", ["reading_date_out", "date_out"], "Reading_Date_out", "date"),
-            F("Total (OUT)", ["total_out", "total_count_out", "count_out"], "Total_out", "bigint"),
-            F("Net Total", ["net_total", "net_count", "net"], "Net_Total", "bigint"),
+            F("Model", ["model", "model_in", "in_model"], "Model", "text"),
+            F("Serial No", ["serial_no", "serial_number", "serial_number_in", "serial_no_in", "serial_in"],
+              "Serial_No", "text"),
+            F("Reading Date Start", ["reading_date_start", "reading_date_in", "date_in", "start_date"],
+              "Reading_Date_Start", "date"),
+            F("Reading Start No", ["reading_start_no", "total_in", "total_count_in", "count_in",
+                                   "start_reading"], "Reading_Start_No", "bigint"),
+            F("Reading Date Closed", ["reading_date_closed", "reading_date_out", "date_out", "closed_date"],
+              "Reading_Date_Closed", "date"),
+            F("Reading Closed No", ["reading_closed_no", "total_out", "total_count_out", "count_out",
+                                    "closed_reading"], "Reading_Closed_No", "bigint"),
+            F("Total Page Print", ["total_page_print", "total_print", "net_total", "net_count", "net"],
+              "Total_Page_Print", "bigint"),
         ],
         "last": [
             F("Reason", ["reason", "remark", "remarks"], "Reason", "text"),
@@ -212,10 +219,10 @@ FIELD_ORDER = {
 OCR_MAP = {
     "Machine_Counter": {
         "machine_counter_in_photo_path": {
-            "model": "Model (IN)", "serial": "Serial Number (IN)", "date": "Reading Date (IN)",
-            "counter": "Counter No (IN)", "total": "Total (IN)"},
+            "model": "Model", "serial": "Serial No", "date": "Reading Date Start",
+            "counter": "Counter No (IN)", "total": "Reading Start No"},
         "machine_counter_out_photo_path": {
-            "date": "Reading Date (OUT)", "total": "Total (OUT)"},
+            "date": "Reading Date Closed", "total": "Reading Closed No"},
     },
 }
 OCR_NAMES = {"model": "Model", "serial": "Serial Number", "date": "Reading Date",
@@ -234,7 +241,7 @@ def _both_minus(a, b):
 
 CALC = {
     "Machine_Counter": [
-        {"target": "Net Total", "uses": ["Total (OUT)", "Total (IN)"], "fn": _both_minus,
+        {"target": "Total Page Print", "uses": ["Reading Closed No", "Reading Start No"], "fn": _both_minus,
          "desc": "Total OUT − Total IN", "no_negative": True},
     ],
     "Machine_Parts": [
@@ -504,7 +511,7 @@ def input_for(col: dict, key: str, label: str | None = None):
         return st.checkbox(label, key=key)
     if dt == "date":
         # "OUT" wali date (jaise Reading Date OUT) apne-aap aaj ki nahi bharegi - reading aane par bharein
-        today = None if "out" in name.lower() else now_ist().date()
+        today = None if any(w in name.lower() for w in ("out", "closed", "close", "end")) else now_ist().date()
         dv = {} if key in st.session_state else {"value": today}
         return st.date_input(label, format="DD/MM/YYYY", key=key, **dv)
     if dt.startswith("timestamp"):
@@ -572,11 +579,20 @@ def arrange_fields(table: str, fields: list[dict]):
         missing.append(spec)
         return None
 
+    for a in conf.get("hide", []):                   # chhupane wale column
+        col = by_norm.get(norm(a))
+        if col:
+            used.add(col)
     first = [c for c in (match(sp) for sp in conf.get("first", [])) if c]
     last = [c for c in (match(sp) for sp in conf.get("last", [])) if c]
     middle = [c["column_name"] for c in fields if c["column_name"] not in used]
     order = first + middle + last
     return [(c, labels.get(c, pretty(c))) for c in order], labels, missing
+
+
+def hidden_columns(table: str, names) -> set:
+    hide = {norm(a) for a in FIELD_ORDER.get(table, {}).get("hide", [])}
+    return {n for n in names if norm(n) in hide}
 
 
 def missing_sql(table: str, missing: list[dict]) -> str:
@@ -588,7 +604,7 @@ def photo_fields(table: str, cols: list[dict]) -> list[dict]:
     """Is table ke photo columns (jo database mein sach mein maujood hain)."""
     out = []
     for f in PHOTOS.get(table, {}).get("fields", []):
-        real = find_col(cols, f["col"])
+        real = next((r for r in (find_col(cols, n) for n in [f["col"]] + f.get("alts", [])) if r), None)
         if real:
             out.append({**f, "col": real})
     known = {f["col"] for f in out}
@@ -755,7 +771,7 @@ def _one_extra(ocr: str, known: str) -> bool:
 def fix_serial(db, table: str, labels: dict, serial: str) -> str:
     """OCR wale Serial ko pehle se save Serial Numbers se milata hai (K2T00864 -> KZT00864)."""
     by_label = {lbl: col for col, lbl in labels.items()}
-    scols = [c for c in (by_label.get("Serial Number (IN)"), by_label.get("Serial Number (OUT)")) if c]
+    scols = [c for c in (by_label.get("Serial No"), by_label.get("Serial Number (OUT)")) if c]
     if not db or not scols or not serial:
         return serial
     try:
@@ -776,7 +792,7 @@ def fix_serial(db, table: str, labels: dict, serial: str) -> str:
 def lookup_by_serial(db, table: str, labels: dict, order_col: str, serial: str) -> dict:
     """Isi Serial Number wali pichhli entry se Machine No aur Model nikalta hai."""
     by_label = {lbl: col for col, lbl in labels.items()}
-    scols = [c for c in (by_label.get("Serial Number (IN)"), by_label.get("Serial Number (OUT)")) if c]
+    scols = [c for c in (by_label.get("Serial No"), by_label.get("Serial Number (OUT)")) if c]
     mcol = by_label.get("Machine No")
     if not db or not scols or not mcol or not serial:
         return {}
@@ -790,7 +806,7 @@ def lookup_by_serial(db, table: str, labels: dict, order_col: str, serial: str) 
     for r in rows:
         if not out.get("machine") and r.get(mcol):
             out["machine"] = str(r[mcol])
-        for lbl in ("Model (IN)", "Model (OUT)"):
+        for lbl in ("Model", "Model (OUT)"):
             c = by_label.get(lbl)
             if not out.get("model") and c and r.get(c):
                 out["model"] = str(r[c])
@@ -1176,7 +1192,9 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     if days_col:                           # Net Days: Reading Date (OUT) ke theek baad
         at = order.index(sc["dout"]) + 1 if sc["dout"] in order else len(order)
         order.insert(at, days_col)
-    order = [c for c in order if c in df.columns] + [c for c in df.columns if c not in order]
+    hid = hidden_columns(table, df.columns)
+    order = [c for c in order if c in df.columns and c not in hid] + \
+            [c for c in df.columns if c not in order and c not in hid]
     df = df[order]
     all_labels = {n: lbl for n, lbl in ordered}
 
@@ -1255,9 +1273,9 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
 def summary_cols(table: str, cols: list[dict]) -> dict:
     """Grand Total ke liye zaroori columns ke asli naam (Machine Counter / Paper / PDF Detail)."""
     want = {
-        "Machine_Counter": {"din": "Reading Date (IN)", "dout": "Reading Date (OUT)",
-                            "tin": "Total (IN)", "tout": "Total (OUT)",
-                            "net": "Net Total", "mach": "Machine No"},
+        "Machine_Counter": {"din": "Reading Date Start", "dout": "Reading Date Closed",
+                            "tin": "Reading Start No", "tout": "Reading Closed No",
+                            "net": "Total Page Print", "mach": "Machine No"},
         "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
                         "bal": "Balance Paper Qty"},
         "Attendance": {"emp": "Employee ID", "name": "Name", "date": "Date", "hours": "Work Hours",
@@ -1724,8 +1742,9 @@ SKIP_ROW_RE = re.compile(r"^\s*(grand\s*total|total\s*parts|total|kul|note)\b", 
 def upload_columns(table: str, cols: list[dict]) -> list[dict]:
     """Excel se bhare ja sakne wale columns (id/created_at/photo/modify chhod kar)."""
     pics = {f["col"] for f in photo_fields(table, cols)}
+    hid = hidden_columns(table, [c["column_name"] for c in cols])
     return [c for c in cols if not c["is_auto"] and c["column_name"] not in pics
-            and not is_modify_col(c["column_name"])]
+            and c["column_name"] not in hid and not is_modify_col(c["column_name"])]
 
 
 def header_map(table: str, fields: list[dict]) -> dict:
@@ -1855,7 +1874,7 @@ UPLOAD_KEYS = {
     "Toner": ["Invoice No", "Toner Qty"],
     "PDF_DETAIL": ["Ac No", "Part No"],
     "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
-    "Machine_Counter": ["Machine No", "Reading Date (IN)"],
+    "Machine_Counter": ["Machine No", "Reading Date Start"],
     "Attendance": ["Employee ID", "Date"],
 }
 PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
