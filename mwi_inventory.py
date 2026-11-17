@@ -390,6 +390,15 @@ class Supabase:
             msg = f"{r.status_code} {r.text[:200]}"
         raise RuntimeError(msg)
 
+    def count(self, table: str) -> int | None:
+        """Table mein kul entries (sirf ginti, data nahi laata)."""
+        h = {**self.h, "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"}
+        r = requests.get(self.base + table, headers=h, params={"select": "*"}, timeout=20)
+        if not r.ok and r.status_code != 416:
+            return None
+        m = re.search(r"/(\d+)$", r.headers.get("Content-Range", ""))
+        return int(m[1]) if m else None
+
     def columns(self, table: str) -> list[dict]:
         r = requests.post(self.base + "rpc/mwi_table_columns", headers=self.h,
                           json={"p_table": table}, timeout=20)
@@ -2114,6 +2123,16 @@ def main():
         st.stop()
 
     db = Supabase(url, key)
+    counts = []                                      # har table ki kul entries
+    for t, name in TABLES.items():
+        try:
+            n = db.count(t)
+        except Exception:
+            n = None
+        counts.append((name, "–" if n is None else f"{n:,}"))
+    st.markdown("**Total Entries**")
+    st.markdown(_card_row(counts), unsafe_allow_html=True)
+
     tabs = st.tabs(list(TABLES.values()))
     for tab, table in zip(tabs, TABLES):
         with tab:
