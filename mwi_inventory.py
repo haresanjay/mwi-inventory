@@ -88,9 +88,10 @@ PHOTOS = {
             {"col": "machine_counter_in_photo_path", "label": "Counter Start Photo",
              "alts": ["counter_start_photo", "counter_start_photo_path"],
              "folder": "counter_in", "button": "📥 Counter Start Image", "title": "Counter Start"},
-            {"col": "machine_counter_out_photo_path", "label": "Counter Closed Photo",
-             "alts": ["counter_closed_photo", "counter_closed_photo_path"],
-             "folder": "counter_out", "button": "📤 Counter Closed Image", "title": "Counter Closed"},
+            {"col": "machine_counter_out_photo_path", "label": "Counter End Photo",
+             "alts": ["counter_end_photo", "counter_end_photo_path", "counter_closed_photo",
+                      "counter_closed_photo_path"],
+             "folder": "counter_out", "button": "📤 Counter End Image", "title": "Counter End"},
         ],
     },
 }
@@ -115,24 +116,25 @@ FIELD_ORDER = {
     "Machine_Counter": {
         "hide": ["counter_no_in", "counter_in", "counter_no"],   # form / list mein nahi dikhega
         "first": [
-            F("Machine No", ["machine_no", "machine_number", "mc_no", "machine"], "Machine_No", "text"),
             F("Model", ["model", "model_in", "in_model"], "Model", "text"),
             F("Serial No", ["serial_no", "serial_number", "serial_number_in", "serial_no_in", "serial_in"],
               "Serial_No", "text"),
-            F("Reading Date Start", ["reading_date_start", "reading_date_in", "date_in", "start_date"],
-              "Reading_Date_Start", "date"),
+            F("Machine No", ["machine_no", "machine_number", "mc_no", "machine"], "Machine_No", "text"),
+            F("Reading Start Date", ["reading_start_date", "reading_date_start", "reading_date_in", "date_in",
+                                     "start_date"], "Reading_Start_Date", "date"),
+            F("Reading End Date", ["reading_end_date", "reading_date_closed", "reading_date_out", "date_out",
+                                   "closed_date", "end_date"], "Reading_End_Date", "date"),
             F("Reading Start No", ["reading_start_no", "total_in", "total_count_in", "count_in",
                                    "start_reading"], "Reading_Start_No", "bigint"),
-            F("Reading Date Closed", ["reading_date_closed", "reading_date_out", "date_out", "closed_date"],
-              "Reading_Date_Closed", "date"),
-            F("Reading Closed No", ["reading_closed_no", "total_out", "total_count_out", "count_out",
-                                    "closed_reading"], "Reading_Closed_No", "bigint"),
-            F("Total Page Print", ["total_page_print", "total_print", "net_total", "net_count", "net"],
-              "Total_Page_Print", "bigint"),
+            F("Reading End No", ["reading_end_no", "reading_closed_no", "total_out", "total_count_out",
+                                 "count_out", "closed_reading", "end_reading"], "Reading_End_No", "bigint"),
+            F("Total Print Page", ["total_print_page", "total_page_print", "total_print", "net_total",
+                                   "net_count", "net"], "Total_Print_Page", "bigint"),
         ],
         "last": [
             F("Reason", ["reason", "remark", "remarks"], "Reason", "text"),
         ],
+        "after_photos": ["Reason"],          # list mein photo ke baad
     },
     "PDF_DETAIL": {
         "first": [
@@ -219,10 +221,10 @@ FIELD_ORDER = {
 OCR_MAP = {
     "Machine_Counter": {
         "machine_counter_in_photo_path": {
-            "model": "Model", "serial": "Serial No", "date": "Reading Date Start",
+            "model": "Model", "serial": "Serial No", "date": "Reading Start Date",
             "counter": "Counter No (IN)", "total": "Reading Start No"},
         "machine_counter_out_photo_path": {
-            "date": "Reading Date Closed", "total": "Reading Closed No"},
+            "date": "Reading End Date", "total": "Reading End No"},
     },
 }
 OCR_NAMES = {"model": "Model", "serial": "Serial Number", "date": "Reading Date",
@@ -241,7 +243,7 @@ def _both_minus(a, b):
 
 CALC = {
     "Machine_Counter": [
-        {"target": "Total Page Print", "uses": ["Reading Closed No", "Reading Start No"], "fn": _both_minus,
+        {"target": "Total Print Page", "uses": ["Reading End No", "Reading Start No"], "fn": _both_minus,
          "desc": "Total OUT − Total IN", "no_negative": True},
     ],
     "Machine_Parts": [
@@ -1159,7 +1161,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     if sc.get("din") in df.columns and sc.get("dout") in df.columns:
         days = (pd.to_datetime(df[sc["dout"]], errors="coerce")
                 - pd.to_datetime(df[sc["din"]], errors="coerce")).dt.days
-        days_col = "Net Days"
+        days_col = "Total Days"
         df[days_col] = days.astype("Int64")
     for c in cols:                         # poore ank bina .00 ke
         if c["column_name"] in df.columns and is_whole(c):
@@ -1189,7 +1191,12 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
              + [c["column_name"] for c in auto if c["data_type"].startswith("timestamp")
                 and c["column_name"] not in mods]
              + mods)                       # Modify Date sabse aakhir mein (created_at ke baad)
-    if days_col:                           # Net Days: Reading Date (OUT) ke theek baad
+    after = [c for c, l in labels.items() if l in FIELD_ORDER.get(table, {}).get("after_photos", [])]
+    if after and pic_cols:                 # jaise Reason: photos ke baad
+        order = [c for c in order if c not in after]
+        at = order.index(pic_cols[-1]) + 1
+        order[at:at] = after
+    if days_col:                           # Total Days: Reading End Date ke theek baad
         at = order.index(sc["dout"]) + 1 if sc["dout"] in order else len(order)
         order.insert(at, days_col)
     hid = hidden_columns(table, df.columns)
@@ -1273,9 +1280,9 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
 def summary_cols(table: str, cols: list[dict]) -> dict:
     """Grand Total ke liye zaroori columns ke asli naam (Machine Counter / Paper / PDF Detail)."""
     want = {
-        "Machine_Counter": {"din": "Reading Date Start", "dout": "Reading Date Closed",
-                            "tin": "Reading Start No", "tout": "Reading Closed No",
-                            "net": "Total Page Print", "mach": "Machine No"},
+        "Machine_Counter": {"din": "Reading Start Date", "dout": "Reading End Date",
+                            "tin": "Reading Start No", "tout": "Reading End No",
+                            "net": "Total Print Page", "mach": "Machine No"},
         "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
                         "bal": "Balance Paper Qty"},
         "Attendance": {"emp": "Employee ID", "name": "Name", "date": "Date", "hours": "Work Hours",
@@ -1874,7 +1881,7 @@ UPLOAD_KEYS = {
     "Toner": ["Invoice No", "Toner Qty"],
     "PDF_DETAIL": ["Ac No", "Part No"],
     "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
-    "Machine_Counter": ["Machine No", "Reading Date Start"],
+    "Machine_Counter": ["Machine No", "Reading Start Date"],
     "Attendance": ["Employee ID", "Date"],
 }
 PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
