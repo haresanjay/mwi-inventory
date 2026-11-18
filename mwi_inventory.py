@@ -359,11 +359,26 @@ def save_settings(data: dict):
 
 # ------------------------------------------------------------------ Supabase REST
 class Supabase:
-    def __init__(self, url: str, key: str):
+    def __init__(self, url: str, key: str, user: str = ""):
         self.root = url.rstrip("/")
         self.base = self.root + "/rest/v1/"
         self.h = {"apikey": key, "Authorization": f"Bearer {key}",
                   "Content-Type": "application/json"}
+        self.user = user                   # login user – Created_By / Modify_By mein jayega
+        self._cols = {}
+
+    def _stamp(self, table: str, row: dict, kind: str) -> dict:
+        """Table mein Created_By / Modify_By column ho to login user ka naam bhar do."""
+        if not self.user:
+            return row
+        try:
+            if table not in self._cols:
+                self._cols[table] = [c["column_name"] for c in self.columns(table)]
+        except Exception:
+            return row
+        want = CREATED_BY_NAMES if kind == "create" else MODIFY_BY_NAMES
+        col = next((c for c in self._cols[table] if norm(c) in want), None)
+        return {**row, col: self.user} if col else row
 
     # ---- Storage (photos)
     def upload(self, path: str, data: bytes, content_type="image/jpeg") -> str:
@@ -430,6 +445,7 @@ class Supabase:
 
     def update(self, table: str, id_col: str, id_val, row: dict):
         """Ek entry (id se) badalta hai. Badli hui rows lautata hai ([] = permission nahi/entry nahi)."""
+        row = self._stamp(table, row, "modify")
         h = {**self.h, "Prefer": "return=representation"}
         return self._check(requests.patch(self.base + table, headers=h,
                                           params={id_col: f"eq.{id_val}"}, json=row, timeout=20))
@@ -441,12 +457,14 @@ class Supabase:
                                            params={id_col: f"eq.{id_val}"}, timeout=20))
 
     def insert(self, table: str, row: dict):
+        row = self._stamp(table, row, "create")
         h = {**self.h, "Prefer": "return=minimal"}
         return self._check(requests.post(self.base + table, headers=h,
                                          json=row, timeout=20))
 
     def insert_many(self, table: str, rows: list[dict], chunk: int = 500):
         """Bahut saari entries ek saath (500-500 karke)."""
+        rows = [self._stamp(table, r, "create") for r in rows]
         h = {**self.h, "Prefer": "return=minimal,missing=default"}
         for i in range(0, len(rows), chunk):
             self._check(requests.post(self.base + table, headers=h,
@@ -674,6 +692,15 @@ def set_widget(col: dict, key: str, value):
 
 MODIFY_NAMES = {"modifydate", "modifieddate", "modifiedat", "modifyat", "updatedat", "modificationdate",
                 "lastmodified", "modifydatetime"}
+
+
+CREATED_BY_NAMES = {"createdby", "entryby", "addedby", "createby"}
+MODIFY_BY_NAMES = {"modifyby", "modifiedby", "updatedby", "editby", "editedby"}
+
+
+def is_user_col(name: str) -> bool:
+    """Created_By / Modify_By – app apne-aap bharti hai, form mein box nahi."""
+    return norm(name) in CREATED_BY_NAMES | MODIFY_BY_NAMES
 
 
 def is_modify_col(name: str) -> bool:
@@ -925,7 +952,7 @@ def entry_form(db: Supabase, table: str, cols: list[dict], edit: dict | None = N
     pics = photo_fields(table, cols)
     pic_cols = {f["col"] for f in pics}
     fields = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols
-              and not is_modify_col(c["column_name"])]
+              and not is_modify_col(c["column_name"]) and not is_user_col(c["column_name"])]
 
     # Save ke baad form khaali karne ke liye har baar naye widget keys
     ver_key = f"{table}_ever" if edit else f"{table}_ver"
@@ -1145,6 +1172,124 @@ def save_entry(db, table, fields, labels, pics, values, uploads, edit=None):
 
 
 # ------------------------------------------------------------------ records + images
+# Har table mein kin field se chhaant (filter) sakte hain (label)
+FILTER_LABELS = {
+    "Machine_Counter": ["Machine No", "Model"],
+    "Machine_Parts": ["Machine No", "Model Number", "Parts Name"],
+    "PDF_DETAIL": ["District Name", "Ac Name", "Ac No"],
+    "Paper_Table": ["Party Name", "Paper Company", "GSM"],
+    "Toner": ["Toner Company", "Party Name"],
+    "Attendance": ["Name", "Status", "Department"],
+}
+
+
+def _txt(v) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip()
+
+
+def filter_rows(table: str, cols: list[dict], rows: list[dict]) -> list[dict]:
+    """🔍 Filter: tarikh se–tak, field ki value, aur kuch bhi likh kar khojna."""
+    if not rows:
+        return rows
+    inputs = [c for c in cols if not c["is_auto"]]
+    ordered, labels, _ = arrange_fields(table, inputs)
+    by_label = {l: c for c, l in labels.items()}
+    meta = {c["column_name"]: c for c in cols}
+    dates = [c for c, _ in ordered if meta[c]["data_type"] == "date"]
+    dates += [c["column_name"] for c in cols if c["data_type"].startswith("timestamp")
+              and not is_modify_col(c["column_name"])]
+    k = f"{table}_flt"
+    active = any(st.session_state.get(f"{k}_{x}") not in (None, "", [])
+                 for x in ("from", "to", "q")) or any(
+        st.session_state.get(f"{k}_v_{l}") for l in FILTER_LABELS.get(table, []))
+    with st.expander("🔍 Filter / Khojein" + ("  (chalu hai)" if active else ""), expanded=active):
+        c1, c2, c3 = st.columns([2, 1, 1])
+        dcol = None
+        if dates:
+            dcol = c1.selectbox("Tarikh ka field", dates, key=f"{k}_dcol",
+                                format_func=lambda c: labels.get(c, pretty(c)))
+            d_from = c2.date_input("Se", value=None, format="DD/MM/YYYY", key=f"{k}_from")
+            d_to = c3.date_input("Tak", value=None, format="DD/MM/YYYY", key=f"{k}_to")
+        flts = [l for l in FILTER_LABELS.get(table, []) if by_label.get(l)]
+        picks = {}
+        if flts:
+            fc = st.columns(len(flts))
+            for i, l in enumerate(flts):
+                col = by_label[l]
+                opts = sorted({_txt(r.get(col)) for r in rows if _txt(r.get(col))},
+                              key=lambda x: (len(x), x) if x.isdigit() else (99, x.lower()))
+                picks[col] = fc[i].multiselect(l, opts, key=f"{k}_v_{l}")
+        q = st.text_input("Kuch bhi likh kar khojein (Invoice No, naam, number…)", key=f"{k}_q")
+
+    out = rows
+    if dcol:
+        t = pd.to_datetime(pd.Series([r.get(dcol) for r in out], dtype=object), errors="coerce", utc=True)
+        if meta[dcol]["data_type"] == "timestamp with time zone":
+            t = t.dt.tz_convert(IST)
+        dd = t.dt.date
+        keep = pd.Series(True, index=dd.index)
+        if d_from:
+            keep &= dd.notna() & (dd >= d_from)
+        if d_to:
+            keep &= dd.notna() & (dd <= d_to)
+        out = [r for r, ok in zip(out, keep) if ok]
+    for col, vals in picks.items():
+        if vals:
+            vs = set(vals)
+            out = [r for r in out if _txt(r.get(col)) in vs]
+    if q and q.strip():
+        words = q.lower().split()
+        out = [r for r in out if all(any(w in _txt(v).lower() for v in r.values()) for w in words)]
+    if len(out) != len(rows):
+        st.caption(f"🔍 Filter: **{len(out):,}** / {len(rows):,} entries  (Grand Total bhi inhi ka)")
+    return out
+
+
+def backup_sidebar(db):
+    """💾 Sabhi tables ki ek Excel file (har table ki alag sheet)."""
+    with st.sidebar:
+        st.header("💾 Backup")
+        if st.button("💾 Backup Excel banayein", use_container_width=True, key="bk_make"):
+            try:
+                with st.spinner("Backup ban raha hai... Pls Wait"):
+                    buf = io.BytesIO()
+                    counts = []
+                    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+                        for t, name in TABLES.items():
+                            try:
+                                rows = db.select_all(t, {"select": "*", "order": "id.asc"})
+                            except Exception:
+                                try:
+                                    rows = db.select_all(t, {"select": "*"})
+                                except Exception:
+                                    continue          # table nahi bani (jaise Attendance)
+                            df = pd.DataFrame(rows)
+                            if df.empty:
+                                df = pd.DataFrame({"(khaali)": []})
+                            df.to_excel(xw, sheet_name=t[:31], index=False)
+                            ws = xw.sheets[t[:31]]
+                            ws.freeze_panes = "A2"
+                            for i, c in enumerate(df.columns, 1):
+                                w = max([len(str(c))] + [len(_txt(v)) for v in df[c].head(200)])
+                                ws.column_dimensions[ws.cell(1, i).column_letter].width = min(max(w + 2, 8), 45)
+                            counts.append(f"{t}: {len(rows)}")
+                    st.session_state["bk_data"] = buf.getvalue()
+                    st.session_state["bk_name"] = f"MWI_Backup_{now_ist():%d-%m-%Y_%H%M}.xlsx"
+                    st.session_state["bk_info"] = ",  ".join(counts)
+            except Exception as e:
+                st.error(f"Backup nahi bana: {e}")
+        if st.session_state.get("bk_data"):
+            st.download_button("⬇️ Backup Download", st.session_state["bk_data"],
+                               file_name=st.session_state["bk_name"], use_container_width=True,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="bk_dl")
+            st.caption(st.session_state.get("bk_info", ""))
+
+
 def records_view(db: Supabase, table: str, cols: list[dict]):
     first = cols[0]["column_name"]
     try:                                   # saari entries (koi limit nahi)
@@ -1155,6 +1300,10 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.info("Empty Entry ?")
         return
     st.caption(f"Total Entries: {len(rows):,}")
+    rows = filter_rows(table, cols, rows)
+    if not rows:
+        st.info("Is filter se koi entry nahi mili.")
+        return
     df = pd.DataFrame(rows)
     sc = summary_cols(table, cols)         # Machine Counter: dates / totals ke columns
     days_col = None
@@ -1181,7 +1330,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
 
     # columns ka kram: id -> form wale fields -> photos -> created_at
     auto = [c for c in cols if c["is_auto"]]
-    mods = [c["column_name"] for c in cols if is_modify_col(c["column_name"])]
+    mods = [c["column_name"] for c in cols if is_modify_col(c["column_name"]) or is_user_col(c["column_name"])]
     inputs = [c for c in cols if not c["is_auto"] and c["column_name"] not in pic_cols
               and c["column_name"] not in mods]
     ordered, labels, _ = arrange_fields(table, inputs)
@@ -1234,7 +1383,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     if sc:
         {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
          "PDF_DETAIL": pdf_summary, "Toner": toner_summary,
-         "Attendance": attendance_summary}[table](db, table, sc)
+         "Attendance": attendance_summary}[table](db, table, sc, rows=rows)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
         return                                     # edit chal raha hai: neeche ka hissa chhupa
@@ -1314,7 +1463,10 @@ def _card_row(cards: list[tuple]) -> str:
             + "".join(_card(n, v) for n, v in cards) + "</div>")
 
 
-def _all_rows(db, table: str, sc: dict):
+def _all_rows(db, table: str, sc: dict, rows=None):
+    if rows is not None:                   # Entries Show se (filter ke baad) mili entries
+        df = pd.DataFrame(rows)
+        return None if df.empty else df
     try:
         rows = db.select_all(table, {"select": ",".join(sorted(set(sc.values())))})
     except Exception as e:
@@ -1330,9 +1482,9 @@ def _num(df, col):
     return pd.to_numeric(df[col], errors="coerce").fillna(0)
 
 
-def paper_summary(db, table: str, sc: dict):
+def paper_summary(db, table: str, sc: dict, rows=None):
     """Paper: poori table ka No of Paper, Consumption Paper, Balance Paper Qty ka jod."""
-    df = _all_rows(db, table, sc)
+    df = _all_rows(db, table, sc, rows)
     if df is None:
         return
     st.markdown("**Grand Total**")
@@ -1343,9 +1495,9 @@ def paper_summary(db, table: str, sc: dict):
     ]), unsafe_allow_html=True)
 
 
-def attendance_summary(db, table: str, sc: dict):
+def attendance_summary(db, table: str, sc: dict, rows=None):
     """Attendance: har mahine, har karmchari – kitne din aaya, kul ghante, Out Missing."""
-    df = _all_rows(db, table, sc)
+    df = _all_rows(db, table, sc, rows)
     if df is None or sc.get("date") not in df.columns:
         return
     d = pd.to_datetime(df[sc["date"]], errors="coerce")
@@ -1370,9 +1522,9 @@ def attendance_summary(db, table: str, sc: dict):
     st.dataframe(t, use_container_width=True, hide_index=True)
 
 
-def toner_summary(db, table: str, sc: dict):
+def toner_summary(db, table: str, sc: dict, rows=None):
     """Toner: poori table ka Toner Qty, Toner Used, Toner Balance Qty ka jod."""
-    df = _all_rows(db, table, sc)
+    df = _all_rows(db, table, sc, rows)
     if df is None:
         return
     def money(v):                                    # Indian tarika: ₹ 1,21,381.36
@@ -1412,9 +1564,9 @@ def toner_summary(db, table: str, sc: dict):
             st.caption(f"✔ Sabhi {int(has.sum())} entries mein Toner Qty × Rate = Amount mil raha hai.")
 
 
-def pdf_summary(db, table: str, sc: dict):
+def pdf_summary(db, table: str, sc: dict, rows=None):
     """PDF Detail: har District + AC ki alag row – Total Parts, Total Pages, Both Side, Single Side."""
-    df = _all_rows(db, table, sc)
+    df = _all_rows(db, table, sc, rows)
     if df is None:
         return
 
@@ -1460,13 +1612,14 @@ def pdf_summary(db, table: str, sc: dict):
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def counter_summary(db, table: str, sc: dict):
-    """CSV download ke neeche: poori Machine_Counter table ka jod."""
-    try:
-        rows = db.select_all(table, {"select": ",".join(sorted(set(sc.values())))})
-    except Exception as e:
-        st.caption(f"Total nahi nikal saka: {e}")
-        return
+def counter_summary(db, table: str, sc: dict, rows=None):
+    """CSV download ke neeche: Machine_Counter ka jod (filter ke baad wali entries)."""
+    if rows is None:
+        try:
+            rows = db.select_all(table, {"select": ",".join(sorted(set(sc.values())))})
+        except Exception as e:
+            st.caption(f"Total nahi nikal saka: {e}")
+            return
     df = pd.DataFrame(rows)
     if df.empty:
         return
@@ -1520,6 +1673,10 @@ def counter_summary(db, table: str, sc: dict):
 
 def edit_section(db, table: str, cols: list[dict], df, rows: list[dict], sel_rows: list) -> bool:
     """Chuni hui row ke liye ✏️ Edit button aur edit form. Edit chal raha ho to True."""
+    if not is_admin():                     # Operator: Edit / Delete nahi
+        if sel_rows:
+            st.caption("🔒 Edit / Delete sirf Admin kar sakta hai.")
+        return False
     id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
     msg = st.session_state.pop(f"{table}_edit_msg", None)
     if msg:
@@ -1708,12 +1865,32 @@ def app_users() -> dict:
     return {str(k).strip().lower(): str(v) for k, v in u.items()}
 
 
+def user_roles() -> dict:
+    """Secrets ke [roles] se:  op1 = "admin",  op2 = "operator".  Na ho to sab admin."""
+    try:
+        r = {str(k).strip().lower(): str(v).strip().lower() for k, v in dict(st.secrets["roles"]).items()}
+        if r:
+            return r
+    except Exception:
+        pass
+    return {str(k).strip().lower(): str(v).strip().lower()
+            for k, v in (load_settings().get("roles") or {}).items()}
+
+
+def is_admin() -> bool:
+    roles = user_roles()
+    if not roles:                                    # [roles] nahi likha: pehle jaisa, sab admin
+        return True
+    return roles.get(st.session_state.get("login_user", ""), "operator") == "admin"
+
+
 def login_gate() -> bool:
     """App khulte hi pehle User + Password."""
     users = app_users()
     if st.session_state.get("login_user") in users:
         with st.sidebar:
-            st.markdown(f"👤 **{st.session_state['login_user']}**")
+            st.markdown(f"👤 **{st.session_state['login_user']}**  ·  "
+                        + ("🛡️ Admin" if is_admin() else "🧑‍💼 Operator"))
             if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
                 st.session_state.pop("login_user", None)
                 st.rerun()
@@ -1751,7 +1928,8 @@ def upload_columns(table: str, cols: list[dict]) -> list[dict]:
     pics = {f["col"] for f in photo_fields(table, cols)}
     hid = hidden_columns(table, [c["column_name"] for c in cols])
     return [c for c in cols if not c["is_auto"] and c["column_name"] not in pics
-            and c["column_name"] not in hid and not is_modify_col(c["column_name"])]
+            and c["column_name"] not in hid and not is_modify_col(c["column_name"])
+            and not is_user_col(c["column_name"])]
 
 
 def header_map(table: str, fields: list[dict]) -> dict:
@@ -2148,7 +2326,9 @@ def main():
                  "Supabase → Project Settings → API Keys se copy karein.")
         st.stop()
 
-    db = Supabase(url, key)
+    db = Supabase(url, key, st.session_state.get("login_user", ""))
+    if is_admin():
+        backup_sidebar(db)
     counts = []                                      # har table ki kul entries
     for t, name in TABLES.items():
         try:
@@ -2176,7 +2356,8 @@ def main():
                 st.error(f"Table '{table}' nahi mila. Naam check karein.")
                 continue
 
-            mode = st.radio("Kya karna hai?", ["➕ New Entry", "📋 Entries Show", "📥 Excel Upload"],
+            modes = ["➕ New Entry", "📋 Entries Show"] + (["📥 Excel Upload"] if is_admin() else [])
+            mode = st.radio("Kya karna hai?", modes,
                             horizontal=True, key=f"{table}_mode", label_visibility="collapsed")
             if mode.startswith("➕"):
                 entry_form(db, table, cols)
