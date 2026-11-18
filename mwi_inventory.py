@@ -1595,8 +1595,10 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
 
 
 def _card(name, v, yellow=False):
-    box = ("background:#FFE066;color:#000;border:1px solid #E0B800" if yellow
-           else "border:1px solid rgba(128,128,128,.35)")
+    box = {True: "background:#FFE066;color:#000;border:1px solid #E0B800",
+           "dist": "background:#DDEBF7;color:#000;border:1px solid #8EA9DB",
+           "grand": "background:#C6E0B4;color:#000;border:1px solid #70AD47"}.get(
+        yellow, "border:1px solid rgba(128,128,128,.35)")
     return (f'<div style="flex:1 1 130px;min-width:0;padding:8px 12px;{box};border-radius:8px">'
             f'<div style="font-size:.85rem;opacity:.75">'
             f'{name}</div><div style="font-size:clamp(1rem,1.6vw,1.35rem);font-weight:600;'
@@ -1884,15 +1886,25 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
     groups["_n"] = pd.to_numeric(groups["k_ac"], errors="coerce")
     groups = groups.sort_values(["k_dist", "_n", "k_ac"])
 
+    def cards(dist, acname, acno, parts, pages, both, single, style=False):
+        return _card_row([(n, v, style) for n, v in [
+            ("District Name", dist or "–"), ("Ac Name", acname or "–"), ("Ac No", acno or "–"),
+            ("Total Parts", f"{int(parts):,}"), ("Total Side Print", f"{int(pages):,}"),
+            ("Both Side", f"{int(both):,}"), ("Single Side", f"{int(single):,}"),
+            ("Total Used Paper Sheet (Both + Single)", f"{int(both) + int(single):,}")]])
+
     st.markdown("**Grand Total**")
     html = []
-    for r in groups.itertuples():
-        html.append(_card_row([
-            ("District Name", r.dist or "–"), ("Ac Name", r.acname or "–"), ("Ac No", r.acno or "–"),
-            ("Total Parts", f"{int(r.parts):,}"), ("Total Side Print", f"{int(r.pages):,}"),
-            ("Both Side", f"{int(r.both):,}"), ("Single Side", f"{int(r.single):,}"),
-            ("Total Used Paper Sheet (Both + Single)", f"{int(r.both) + int(r.single):,}"),
-        ]))
+    for kd, part in groups.groupby("k_dist", sort=True):
+        for r in part.itertuples():
+            html.append(cards(r.dist, r.acname, r.acno, r.parts, r.pages, r.both, r.single))
+        if len(part) > 1:                    # District ka jod (neela)
+            html.append(cards(f"{part['dist'].iloc[0] or '–'} TOTAL", f"{len(part)} AC", "–",
+                              part.parts.sum(), part.pages.sum(), part.both.sum(), part.single.sum(), "dist"))
+        html.append('<div style="height:6px"></div>')
+    if groups["k_dist"].nunique() > 1:       # sabka jod (hara)
+        html.append(cards(f"GRAND TOTAL ({groups['k_dist'].nunique()} District)", f"{len(groups)} AC", "–",
+                          groups.parts.sum(), groups.pages.sum(), groups.both.sum(), groups.single.sum(), "grand"))
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
