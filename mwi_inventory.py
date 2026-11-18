@@ -83,6 +83,13 @@ PHOTOS = {
              "button": "🖨️ Toner Image", "title": "Toner Photo"},
         ],
     },
+    "Stock": {
+        "heading": "Stock Photo", "item": "Entry",
+        "fields": [
+            {"col": "stock_photo_path", "label": "Stock Photo", "alts": ["stock_photo"],
+             "folder": "stock_photos", "button": "📦 Stock Image", "title": "Stock Photo"},
+        ],
+    },
     "Machine_Counter": {
         "heading": "Counter Photo", "item": "Entry",
         "fields": [
