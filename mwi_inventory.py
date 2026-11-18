@@ -1375,6 +1375,7 @@ def filter_rows(table: str, cols: list[dict], rows: list[dict]) -> list[dict]:
     if q and q.strip():
         words = q.lower().split()
         out = [r for r in out if all(any(w in _txt(v).lower() for v in r.values()) for w in words)]
+    st.session_state[f"{table}_filtered"] = len(out) != len(rows)
     if len(out) != len(rows):
         st.caption(f"🔍 Filter: **{len(out):,}** / {len(rows):,} entries  (Grand Total bhi inhi ka)")
     return out
@@ -1419,6 +1420,22 @@ def log_view(db):
     st.dataframe(show, use_container_width=True, hide_index=True)
     st.download_button("⬇️ Log Excel (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"MWI_Log_{now_ist():%d-%m-%Y}.csv", mime="text/csv", key="log_dl")
+
+
+def stock_view_pick(table: str, cols: list[dict], rows: list[dict]) -> list[dict]:
+    """Paper Toner Stock: upar 3 button – Sab / Paper Stock / Toner Stock."""
+    _, labels, _ = arrange_fields(table, [c for c in cols if not c["is_auto"]])
+    tcol = next((c for c, l in labels.items() if l == "Item Type"), None)
+    if not tcol:
+        return rows
+    view = st.radio("Dikhayein", ["📦 Sab (Paper + Toner)", "📄 Paper Stock", "🖨️ Toner Stock"],
+                    horizontal=True, key=f"{table}_view", label_visibility="collapsed")
+    st.session_state[f"{table}_view_now"] = view
+    if view.startswith("📄"):
+        return [r for r in rows if _is_paper(r.get(tcol))]
+    if view.startswith("🖨"):
+        return [r for r in rows if not _is_paper(r.get(tcol))]
+    return rows
 
 
 def backup_sidebar(db):
@@ -1473,6 +1490,11 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         st.info("Empty Entry ?")
         return
     st.caption(f"Total Entries: {len(rows):,}")
+    if table == "Paper_Toner_Stock":                 # 📄 Paper / 🖨️ Toner alag-alag dekhna
+        rows = stock_view_pick(table, cols, rows)
+        if not rows:
+            st.info("Is hisse mein abhi koi entry nahi.")
+            return
     rows = filter_rows(table, cols, rows)
     if not rows:
         st.info("Is filter se koi entry nahi mili.")
@@ -1778,19 +1800,26 @@ def stock_summary(db, table: str, sc: dict, rows=None):
         "Toner Kg": g["kg"].where(tt, 0), "d": g["d"]}).groupby("d").sum().sort_index(ascending=False)
     last_d, last = per.index[0], per.iloc[0]
     fmt = lambda v, dec=False: f"{v:,.1f}".rstrip("0").rstrip(".") if dec else f"{int(round(v)):,}"
+    view = st.session_state.get(f"{table}_view_now", "")
+    pc = [("Paper Carton", fmt(last["Paper Carton"], True)), ("Paper Ream", fmt(last["Paper Ream"])),
+          ("Paper Sheet", fmt(last["Paper Sheet"]))]
+    tc = [("Toner Pkt", fmt(last["Toner Pkt"])), ("Toner Kg", fmt(last["Toner Kg"], True))]
     st.markdown(f"**Grand Total – Stock as on {last_d:%d-%m-%Y}**")
-    st.markdown(_card_row([
-        ("Paper Carton", fmt(last["Paper Carton"], True)), ("Paper Ream", fmt(last["Paper Ream"])),
-        ("Paper Sheet", fmt(last["Paper Sheet"])), ("Toner Pkt", fmt(last["Toner Pkt"])),
-        ("Toner Kg", fmt(last["Toner Kg"], True)),
-    ]), unsafe_allow_html=True)
+    st.markdown(_card_row(pc if view.startswith("📄") else tc if view.startswith("🖨") else pc + tc),
+                unsafe_allow_html=True)
     if len(per) > 1:
         t = per.reset_index().rename(columns={"d": "Stock Date"})
         t["Stock Date"] = t["Stock Date"].dt.strftime("%d-%m-%Y")
         st.caption("Har ginti ki tarikh ka stock:")
         st.dataframe(t.round(1), use_container_width=True, hide_index=True)
     if is_admin() and db is not None:
-        stock_sync(db, last_d.date(), int(round(last["Paper Sheet"])), int(round(last["Toner Pkt"])))
+        if st.session_state.get(f"{table}_filtered"):
+            st.caption("🔄 Balance milane ke liye 🔍 Filter hata dein (adhoore stock se Balance galat ban jayega).")
+        else:
+            view = st.session_state.get(f"{table}_view_now", "")
+            which = ("Paper_Table",) if view.startswith("📄") else ("Toner",) if view.startswith("🖨") \
+                else ("Paper_Table", "Toner")
+            stock_sync(db, last_d.date(), int(round(last["Paper Sheet"])), int(round(last["Toner Pkt"])), which)
 
 
 # List mein peele (yellow) dikhne wale kharch ke field
@@ -1839,14 +1868,17 @@ def sync_plan(db, table: str, stock_date, stock_qty: int):
     return plan, info
 
 
-def stock_sync(db, stock_date, paper_sheets: int, toner_pkt: int):
+def stock_sync(db, stock_date, paper_sheets: int, toner_pkt: int, which=("Paper_Table", "Toner")):
     """📦 Stock ki ginti se Paper / Toner table ka Consumption / Used bhar kar Balance milana."""
-    with st.expander(f"🔄 Paper / Toner ka Balance is Stock ({stock_date:%d-%m-%Y}) se milayein"):
+    naam = " / ".join({"Paper_Table": "Paper", "Toner": "Toner"}[w] for w in which)
+    with st.expander(f"🔄 {naam} ka Balance is Stock ({stock_date:%d-%m-%Y}) se milayein"):
         st.caption("Stock ki tarikh tak aayi entries mein se purani entries pehle kharch maani jayengi; "
                    "nayi entries mein Balance bachega, taaki kul Balance = gina hua stock. "
                    f"Paper: {paper_sheets:,} sheet,  Toner: {toner_pkt:,} pkt.")
         plans = {}
         for table, qty in (("Paper_Table", paper_sheets), ("Toner", toner_pkt)):
+            if table not in which:
+                continue
             conf = SYNC[table]
             try:
                 plan, info = sync_plan(db, table, stock_date, qty)
