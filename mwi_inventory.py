@@ -55,6 +55,7 @@ TABLES = {
     "Paper_Table": "📄 Paper",
     "Toner": "🖨️ Toner",
     "Attendance": "🕘 Attendance",
+    "Stock": "📦 Stock",
 }
 
 # Kis table ke kis column mein photo aayegi (column naam chhote/bade akshar se farq nahi padta)
@@ -174,6 +175,24 @@ FIELD_ORDER = {
                                       "amount_with_gst", "total_gst", "bill_total"], "Invoice_Total_GST", "numeric"),
         ],
     },
+    "Stock": {
+        "first": [
+            F("Stock Date", ["stock_date", "date", "as_on_date", "count_date"], "Stock_Date", "date"),
+            F("Item Type", ["item_type", "type", "category"], "Item_Type", "text"),
+            F("Packing", ["packing", "pack"], "Packing", "text"),
+            F("Item Name", ["item_name", "item", "paper", "toner", "name"], "Item_Name", "text"),
+            F("GSM", ["gsm"], "GSM", "integer"),
+            F("Loose Qty", ["loose_qty", "loose_ream", "loose_pkt", "loose"], "Loose_Qty", "numeric"),
+            F("Carton", ["carton", "cartons", "no_of_carton"], "Carton", "numeric"),
+            F("Per Carton", ["per_carton", "pkt_per_carton", "ream_per_carton"], "Per_Carton", "integer"),
+            F("Unit", ["unit"], "Unit", "text"),
+            F("Total Qty", ["total_qty", "total_ream", "total_pkt"], "Total_Qty", "numeric"),
+            F("Total Carton", ["total_carton"], "Total_Carton", "numeric"),
+            F("Total Sheet", ["total_sheet", "total_sheets"], "Total_Sheet", "bigint"),
+            F("Total Kg", ["total_kg", "total_toner_kg", "total_toner"], "Total_Kg", "numeric"),
+            F("Remark", ["remark", "remarks", "note"], "Remark", "text"),
+        ],
+    },
     "Attendance": {
         "first": [
             F("Employee ID", ["employee_id", "emp_id", "employeeid", "empid"], "Employee_ID", "integer"),
@@ -291,6 +310,39 @@ def _att_status(t_in, t_out):
     return "In Missing" if b is not None else None
 
 
+def _num0(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_paper(t) -> bool:
+    return str(t or "").strip().lower().startswith("paper")
+
+
+def _stock_total_qty(t, per, carton, loose):
+    c, l = _num0(carton), _num0(loose)
+    if c is None and l is None:
+        return None
+    pc = _num0(per) or (10 if _is_paper(t) else 20)
+    return round((c or 0) * pc + (l or 0), 2)
+
+
+CALC["Stock"] = [
+    {"target": "Total Qty", "uses": ["Item Type", "Per Carton", "Carton", "Loose Qty"],
+     "fn": _stock_total_qty, "desc": "Carton × Per Carton + Loose Qty"},
+    {"target": "Total Carton", "uses": ["Item Type", "Total Qty", "Per Carton"],
+     "fn": lambda t, q, pc: None if _num0(q) is None else
+     round(_num0(q) / (_num0(pc) or (10 if _is_paper(t) else 20)), 2), "desc": "Total Qty ÷ Per Carton"},
+    {"target": "Total Sheet", "uses": ["Item Type", "Total Qty"],
+     "fn": lambda t, q: round(_num0(q) * 500) if _is_paper(t) and _num0(q) is not None else None,
+     "desc": "Paper: Total Ream × 500"},
+    {"target": "Total Kg", "uses": ["Item Type", "Total Qty"],
+     "fn": lambda t, q: _num0(q) if not _is_paper(t) and _num0(q) is not None else None,
+     "desc": "Toner: Total Pkt × 1 kg"},
+]
+
 CALC["Attendance"] = [
     {"target": "Work Hours", "uses": ["In Time", "Out Time"], "fn": _work_hours, "desc": "Out Time − In Time"},
     {"target": "Status", "uses": ["In Time", "Out Time"], "fn": _att_status, "desc": "In / Out se"},
@@ -332,7 +384,7 @@ NUM_TYPES = {"numeric", "real", "double precision", "money"}
 # numeric column hone par bhi in naamon wale fields poore ank (bina .00) mein dikhte hain
 WHOLE_WORDS = ("total", "counter", "count", "page", "gsm", "noof", "qty", "used", "balance",
                "consumption", "reading", "srno", "sno", "serialno", "acno", "parts", "partno", "side", "price")
-DECIMAL_WORDS = ("rim", "ream", "rate", "amount", "weight", "kg")
+DECIMAL_WORDS = ("rim", "ream", "rate", "amount", "weight", "kg", "carton")
 
 
 def is_whole(col: dict) -> bool:
@@ -1208,6 +1260,7 @@ FILTER_LABELS = {
     "Paper_Table": ["Party Name", "Paper Company", "GSM"],
     "Toner": ["Toner Company", "Party Name"],
     "Attendance": ["Name", "Status", "Department"],
+    "Stock": ["Item Type", "Item Name", "GSM"],
 }
 
 
@@ -1453,7 +1506,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     if sc:
         {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
          "PDF_DETAIL": pdf_summary, "Toner": toner_summary,
-         "Attendance": attendance_summary}[table](db, table, sc, rows=rows)
+         "Attendance": attendance_summary, "Stock": stock_summary}[table](db, table, sc, rows=rows)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
         return                                     # edit chal raha hai: neeche ka hissa chhupa
@@ -1506,6 +1559,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
                         "bal": "Balance Paper Qty"},
         "Attendance": {"emp": "Employee ID", "name": "Name", "date": "Date", "hours": "Work Hours",
                        "status": "Status", "tin": "In Time", "tout": "Out Time"},
+        "Stock": {"date": "Stock Date", "type": "Item Type", "qty": "Total Qty", "ctn": "Total Carton",
+                  "sheet": "Total Sheet", "kg": "Total Kg"},
         "Toner": {"qty": "Toner Qty", "used": "Toner Used", "bal": "Toner Balance Qty",
                   "rate": "Rate", "amt": "Amount", "gst": "Invoice Total (GST)", "inv": "Invoice No"},
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
@@ -1590,6 +1645,37 @@ def attendance_summary(db, table: str, sc: dict, rows=None):
           [["Month", "Name", "Days In", "Present (In+Out)", "Out Missing", "Total Hours"]])
     st.markdown("**Grand Total**")
     st.dataframe(t, use_container_width=True, hide_index=True)
+
+
+def stock_summary(db, table: str, sc: dict, rows=None):
+    """Stock: sabse nayi ginti ki tarikh ka Paper aur Toner stock + har tarikh ka jod."""
+    df = _all_rows(db, table, sc, rows)
+    if df is None or sc.get("date") not in df.columns:
+        return
+    d = pd.to_datetime(df[sc["date"]], errors="coerce")
+    paper = df[sc["type"]].map(_is_paper) if sc.get("type") in df.columns else pd.Series(True, index=df.index)
+    g = pd.DataFrame({"d": d, "paper": paper, "qty": _num(df, sc.get("qty")), "ctn": _num(df, sc.get("ctn")),
+                      "sheet": _num(df, sc.get("sheet")), "kg": _num(df, sc.get("kg"))}).dropna(subset=["d"])
+    if g.empty:
+        return
+    pp, tt = g["paper"], ~g["paper"]
+    per = pd.DataFrame({
+        "Paper Carton": g["ctn"].where(pp, 0), "Paper Ream": g["qty"].where(pp, 0),
+        "Paper Sheet": g["sheet"].where(pp, 0), "Toner Pkt": g["qty"].where(tt, 0),
+        "Toner Kg": g["kg"].where(tt, 0), "d": g["d"]}).groupby("d").sum().sort_index(ascending=False)
+    last_d, last = per.index[0], per.iloc[0]
+    fmt = lambda v, dec=False: f"{v:,.1f}".rstrip("0").rstrip(".") if dec else f"{int(round(v)):,}"
+    st.markdown(f"**Grand Total – Stock as on {last_d:%d-%m-%Y}**")
+    st.markdown(_card_row([
+        ("Paper Carton", fmt(last["Paper Carton"], True)), ("Paper Ream", fmt(last["Paper Ream"])),
+        ("Paper Sheet", fmt(last["Paper Sheet"])), ("Toner Pkt", fmt(last["Toner Pkt"])),
+        ("Toner Kg", fmt(last["Toner Kg"], True)),
+    ]), unsafe_allow_html=True)
+    if len(per) > 1:
+        t = per.reset_index().rename(columns={"d": "Stock Date"})
+        t["Stock Date"] = t["Stock Date"].dt.strftime("%d-%m-%Y")
+        st.caption("Har ginti ki tarikh ka stock:")
+        st.dataframe(t.round(1), use_container_width=True, hide_index=True)
 
 
 def toner_summary(db, table: str, sc: dict, rows=None):
@@ -2144,6 +2230,7 @@ UPLOAD_KEYS = {
     "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
     "Machine_Counter": ["Machine No", "Reading Start Date"],
     "Attendance": ["Employee ID", "Date"],
+    "Stock": ["Stock Date", "Item Type", "Packing", "Item Name", "GSM"],
 }
 PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
 
