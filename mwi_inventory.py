@@ -162,6 +162,12 @@ FIELD_ORDER = {
             F("Both Side", ["both_side", "bothside", "both_side_qty", "duplex"], "Both_Side", "integer"),
             F("Single Side", ["single_side", "singleside", "single_side_qty", "simplex"],
               "Single_Side", "integer"),
+            F("Set", ["set", "set_qty", "sets", "no_of_set"], "Set", "integer"),
+            F("Total Double", ["total_double"], "Total_Double", "bigint"),
+            F("Total Single", ["total_single"], "Total_Single", "bigint"),
+            F("Laser", ["laser", "laser_page", "laser_pages"], "Laser", "bigint"),
+            F("Billing Page", ["billing_page", "billing_pages", "bill_page"], "Billing_Page", "bigint"),
+            F("Carton", ["carton", "cartoon", "cartons"], "Carton", "numeric"),
         ],
     },
     "Toner": {
@@ -335,6 +341,17 @@ def _stock_total_qty(t, per, carton, loose):
     pc = _num0(per) or (10 if _is_paper(t) else 20)
     return round((c or 0) * pc + (l or 0), 2)
 
+
+CALC["PDF_DETAIL"] = [
+    {"target": "Total Double", "uses": ["Set", "Both Side"],
+     "fn": lambda st_, b: None if b is None else st_ * b, "desc": "Both Side × Set"},
+    {"target": "Total Single", "uses": ["Set", "Single Side"],
+     "fn": lambda st_, sg: st_ * (sg or 0), "desc": "Single Side × Set"},
+    {"target": "Billing Page", "uses": ["Total Double", "Total Single", "Laser"],
+     "fn": lambda td, ts, lz: td + (ts or 0) + (lz or 0), "desc": "Total Double + Total Single + Laser"},
+    {"target": "Carton", "uses": ["Billing Page"],
+     "fn": lambda bp: round(bp / 5000, 4), "desc": "Billing Page ÷ 5000"},
+]
 
 CALC["Stock"] = [
     {"target": "Total Qty", "uses": ["Item Type", "Per Carton", "Carton", "Loose Qty"],
@@ -1583,7 +1600,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
                   "rate": "Rate", "amt": "Amount", "gst": "Invoice Total (GST)", "inv": "Invoice No"},
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
                        "page": "Total Pages", "parts": "Total Parts", "both": "Both Side",
-                       "single": "Single Side"},
+                       "single": "Single Side", "td": "Total Double", "ts": "Total Single",
+                       "laser": "Laser", "bill": "Billing Page", "ctn": "Carton"},
     }.get(table)
     if not want:
         return {}
@@ -1881,32 +1899,43 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
         "page": page,
         "parts": given("parts", pd.Series(1, index=df.index)),
         "both": given("both", page // 2), "single": given("single", page % 2),
+        "td": _num(df, sc.get("td")), "ts": _num(df, sc.get("ts")), "laser": _num(df, sc.get("laser")),
+        "bill": _num(df, sc.get("bill")), "ctn": _num(df, sc.get("ctn")),
     })
+    has_bill = sc.get("bill") in df.columns and g["bill"].sum() > 0
     g["k_dist"] = g["dist"].str.upper()
     g["k_ac"] = g["acno"].str.upper().str.replace(r"\.0+$", "", regex=True).str.lstrip("0")
     groups = (g.groupby(["k_dist", "k_ac"], as_index=False, sort=False)
                .agg(dist=("dist", "first"), acno=("acno", "first"),
                     acname=("acname", lambda s: next((x for x in s if x), "")),
                     parts=("parts", "sum"), pages=("page", "sum"),
-                    both=("both", "sum"), single=("single", "sum")))
+                    both=("both", "sum"), single=("single", "sum"),
+                    td=("td", "sum"), ts=("ts", "sum"), laser=("laser", "sum"),
+                    bill=("bill", "sum"), ctn=("ctn", "sum")))
     groups["_n"] = pd.to_numeric(groups["k_ac"], errors="coerce")
     groups = groups.sort_values(["k_dist", "_n", "k_ac"])
 
-    def dcards(dist, n_ac, parts, pages, both, single, style=False):
-        return _card_row([(n, v, style) for n, v in [
+    def dcards(dist, n_ac, parts, pages, both, single, style=False, x=None):
+        items = [
             ("District Name", dist), ("Total AC", f"{int(n_ac):,}"),
             ("Total Parts", f"{int(parts):,}"), ("Total Side Print", f"{int(pages):,}"),
             ("Both Side", f"{int(both):,}"), ("Single Side", f"{int(single):,}"),
-            ("Total Used Paper Sheet (Both + Single)", f"{int(both) + int(single):,}")]], small=True)
+            ("Total Used Paper Sheet (Both + Single)", f"{int(both) + int(single):,}")]
+        if has_bill and x is not None:       # Set / Billing wale field bhare hon to
+            items += [("Total Double", f"{int(x.td.sum()):,}"), ("Total Single", f"{int(x.ts.sum()):,}"),
+                      ("Laser", f"{int(x.laser.sum()):,}"), ("Billing Page", f"{int(x.bill.sum()):,}"),
+                      ("Carton", f"{x.ctn.sum():,.3f}".rstrip("0").rstrip("."))]
+        return _card_row([(n, v, style) for n, v in items], small=True)
 
     st.markdown("**Grand Total**")
     html = []
     for kd, part in groups.groupby("k_dist", sort=True):     # sirf District ka jod
         html.append(dcards(part["dist"].iloc[0] or "–", len(part),
-                           part.parts.sum(), part.pages.sum(), part.both.sum(), part.single.sum()))
+                           part.parts.sum(), part.pages.sum(), part.both.sum(), part.single.sum(), x=part))
     if groups["k_dist"].nunique() > 1:       # sabka jod (hara)
         html.append(dcards(f"GRAND TOTAL ({groups['k_dist'].nunique()} District)", len(groups),
-                           groups.parts.sum(), groups.pages.sum(), groups.both.sum(), groups.single.sum(), "grand"))
+                           groups.parts.sum(), groups.pages.sum(), groups.both.sum(), groups.single.sum(), "grand",
+                           x=groups))
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
@@ -2368,7 +2397,7 @@ def _key(v):
 UPLOAD_KEYS = {
     "Paper_Table": ["Invoice No", "Paper Company", "Qty Rim"],
     "Toner": ["Invoice No", "Toner Qty"],
-    "PDF_DETAIL": ["Ac No", "Part No"],
+    "PDF_DETAIL": [["Ac No", "Part No"], ["District Name", "Ac No"]],   # Part No na ho to District + Ac
     "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
     "Machine_Counter": ["Machine No", "Reading Start Date"],
     "Attendance": ["Employee ID", "Date"],
@@ -2501,9 +2530,15 @@ def excel_upload(db, table: str, cols: list[dict]):
 
     # Purani entries se milaan
     id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
-    key_cols = [by_label.get(k) for k in UPLOAD_KEYS.get(table, [])]
-    key_cols = [k for k in key_cols if k]
-    use_keys = id_col and key_cols and all(any(k in r for r, _ in rows) for k in key_cols)
+    sets = UPLOAD_KEYS.get(table, [])
+    if sets and not isinstance(sets[0], list):
+        sets = [sets]
+    key_cols, use_keys = [], False
+    for ks in sets:                                  # pehla aisa set jiske sab field Excel mein hon
+        kc = [by_label.get(k) for k in ks]
+        if all(kc) and all(any(k in r for r, _ in rows) for k in kc):
+            key_cols, use_keys = kc, bool(id_col)
+            break
     try:
         have = db.select_all(table, {"select": "*"})
     except Exception:
