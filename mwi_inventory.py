@@ -1618,9 +1618,9 @@ def _card(name, v, yellow=False, small=False):
            "grand": "background:#C6E0B4;color:#000;border:1px solid #70AD47"}.get(
         yellow, "border:1px solid rgba(128,128,128,.35)")
     if small:                                   # chhota card (ek line mein zyada aa jayein)
-        return (f'<div style="flex:1 1 90px;min-width:0;padding:4px 8px;{box};border-radius:6px">'
-                f'<div style="font-size:.72rem;opacity:.75;line-height:1.2">{name}</div>'
-                f'<div style="font-size:.98rem;font-weight:600;overflow-wrap:anywhere;line-height:1.3">'
+        return (f'<div style="flex:1 1 66px;min-width:0;padding:3px 6px;{box};border-radius:5px">'
+                f'<div style="font-size:.62rem;opacity:.75;line-height:1.15">{name}</div>'
+                f'<div style="font-size:.82rem;font-weight:600;overflow-wrap:anywhere;line-height:1.25">'
                 f'{v}</div></div>')
     return (f'<div style="flex:1 1 130px;min-width:0;padding:8px 12px;{box};border-radius:8px">'
             f'<div style="font-size:.85rem;opacity:.75">'
@@ -1630,7 +1630,7 @@ def _card(name, v, yellow=False, small=False):
 
 def _card_row(cards: list[tuple], small: bool = False) -> str:
     """cards: (naam, value) ya (naam, value, True) – True = peela card. small = chhote cards."""
-    gap = "6px" if small else "10px"
+    gap = "4px" if small else "10px"
     return (f'<div style="display:flex;flex-wrap:wrap;gap:{gap};margin-bottom:{gap}">'
             + "".join(_card(*c, small=small) for c in cards) + "</div>")
 
