@@ -55,7 +55,7 @@ TABLES = {
     "Paper_Table": "📄 Paper",
     "Toner": "🖨️ Toner",
     "Attendance": "🕘 Attendance",
-    "Stock": "📦 Stock",
+    "Paper_Toner_Stock": "📦 Paper Toner Stock",
     "Scanning": "🖨 Scanning",
 }
 
@@ -84,7 +84,7 @@ PHOTOS = {
              "button": "🖨️ Toner Image", "title": "Toner Photo"},
         ],
     },
-    "Stock": {
+    "Paper_Toner_Stock": {
         "heading": "Stock Photo", "item": "Entry",
         "fields": [
             {"col": "stock_photo_path", "label": "Stock Photo", "alts": ["stock_photo"],
@@ -208,7 +208,7 @@ FIELD_ORDER = {
             F("Remark", ["remark", "remarks", "note"], "Remark", "text"),
         ],
     },
-    "Stock": {
+    "Paper_Toner_Stock": {
         "first": [
             F("Stock Date", ["stock_date", "date", "as_on_date", "count_date"], "Stock_Date", "date"),
             F("Item Type", ["item_type", "type", "category"], "Item_Type", "text"),
@@ -378,7 +378,7 @@ CALC["Scanning"] = [
      "fn": lambda p, r: None if r is None else round(p * r, 2), "desc": "A4 Pages × Rate"},
 ]
 
-CALC["Stock"] = [
+CALC["Paper_Toner_Stock"] = [
     {"target": "Total Qty", "uses": ["Item Type", "Per Carton", "Carton", "Loose Qty"],
      "fn": _stock_total_qty, "desc": "Carton × Per Carton + Loose Qty"},
     {"target": "Total Carton", "uses": ["Item Type", "Total Qty", "Per Carton"],
@@ -1309,7 +1309,7 @@ FILTER_LABELS = {
     "Paper_Table": ["Party Name", "Paper Company", "GSM"],
     "Toner": ["Toner Company", "Party Name"],
     "Attendance": ["Name", "Status", "Department"],
-    "Stock": ["Item Type", "Item Name", "GSM"],
+    "Paper_Toner_Stock": ["Item Type", "Item Name", "GSM"],
     "Scanning": ["Client", "Invoice No", "Payment Status"],
 }
 
@@ -1567,7 +1567,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     if sc:
         {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
          "PDF_DETAIL": pdf_summary, "Toner": toner_summary,
-         "Attendance": attendance_summary, "Stock": stock_summary,
+         "Attendance": attendance_summary, "Paper_Toner_Stock": stock_summary,
          "Scanning": scanning_summary}[table](db, table, sc, rows=rows)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
@@ -1624,7 +1624,7 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
         "Scanning": {"client": "Client", "date": "Scan Date", "pages": "A4 Pages", "rate": "Rate",
                      "amt": "Amount", "inv": "Invoice No", "idate": "Invoice Date", "pstat": "Payment Status",
                      "pdate": "Payment Date"},
-        "Stock": {"date": "Stock Date", "type": "Item Type", "qty": "Total Qty", "ctn": "Total Carton",
+        "Paper_Toner_Stock": {"date": "Stock Date", "type": "Item Type", "qty": "Total Qty", "ctn": "Total Carton",
                   "sheet": "Total Sheet", "kg": "Total Kg"},
         "Toner": {"qty": "Toner Qty", "used": "Toner Used", "bal": "Toner Balance Qty",
                   "rate": "Rate", "amt": "Amount", "gst": "Invoice Total (GST)", "inv": "Invoice No"},
@@ -2511,7 +2511,7 @@ UPLOAD_KEYS = {
     "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
     "Machine_Counter": ["Machine No", "Reading Start Date"],
     "Attendance": ["Employee ID", "Date"],
-    "Stock": ["Stock Date", "Item Type", "Packing", "Item Name", "GSM"],
+    "Paper_Toner_Stock": ["Stock Date", "Item Type", "Packing", "Item Name", "GSM"],
     "Scanning": ["Client", "Scan Date"],
 }
 PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
