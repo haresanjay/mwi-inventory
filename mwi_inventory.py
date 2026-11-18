@@ -68,6 +68,8 @@ PHOTOS = {
              "button": "🔧 Old Parts Image", "title": "Purana Part (Old)"},
             {"col": "new_item_pic_path", "label": "New Parts Photo", "folder": "new_parts",
              "button": "✨ New Parts Image", "title": "Naya Part (New)"},
+            {"col": "invoice_photo_path", "label": "Invoice Photo", "alts": ["invoice_photo", "bill_photo"],
+             "folder": "parts_invoices", "button": "🧾 Invoice Image", "title": "Invoice (Bill)"},
         ],
     },
     "Paper_Table": {
@@ -127,6 +129,11 @@ FIELD_ORDER = {
             F("Qty", ["qty", "quantity"], "Qty", "integer"),
             F("Price", ["price", "rate", "unit_price"], "Price", "numeric"),
             F("Total Value", ["total_value", "total_amount", "amount", "value", "total"], "Total_Value", "numeric"),
+            F("Unit", ["unit", "uom"], "Unit", "text"),
+            F("Supplier", ["supplier", "supplier_name", "party_name", "vendor"], "Supplier", "text"),
+            F("Invoice No", ["invoice_no", "invoice_number", "bill_no"], "Invoice_No", "text"),
+            F("Invoice Date", ["invoice_date", "bill_date", "purchase_date"], "Invoice_Date", "date"),
+            F("Payment", ["payment", "payment_detail", "payment_status", "paid_by"], "Payment", "text"),
         ],
     },
     "Machine_Counter": {
@@ -1311,7 +1318,7 @@ def save_entry(db, table, fields, labels, pics, values, uploads, edit=None):
 # Har table mein kin field se chhaant (filter) sakte hain (label)
 FILTER_LABELS = {
     "Machine_Counter": ["Machine No", "Model"],
-    "Machine_Parts": ["Machine No", "Model Number", "Parts Name"],
+    "Machine_Parts": ["Supplier", "Invoice No", "Machine No", "Model Number", "Parts Name"],
     "PDF_DETAIL": ["Roll Type", "Publish Date", "District Name", "Ac Name", "Ac No"],
     "Paper_Table": ["Party Name", "Paper Company", "GSM"],
     "Toner": ["Toner Company", "Party Name"],
@@ -2547,7 +2554,8 @@ UPLOAD_KEYS = {
                    ["Publish Date", "Ac No", "Part No"], ["Publish Date", "District Name", "Ac No"],
                    ["Roll Type", "Ac No", "Part No"], ["Roll Type", "District Name", "Ac No"],
                    ["Ac No", "Part No"], ["District Name", "Ac No"]],   # har Roll + tarikh alag
-    "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
+    "Machine_Parts": [["Supplier", "Invoice No", "Sr No", "Parts Name"], ["Invoice No", "Sr No", "Parts Name"],
+                      ["Sr No", "Parts Name", "Model Number"]],   # bill ki line alag, stock list alag
     "Machine_Counter": ["Machine No", "Reading Start Date"],
     "Attendance": ["Employee ID", "Date"],
     "Paper_Toner_Stock": ["Stock Date", "Item Type", "Packing", "Item Name", "GSM"],
@@ -2572,8 +2580,11 @@ def excel_upload(db, table: str, cols: list[dict]):
     pic_hdr = {}                                     # norm(heading) -> photo field
     for f in pics:                                   # pehle asli column naam, phir label
         pic_hdr.setdefault(norm(f["col"]), f)
-    for f in pics:
-        for a in (f["label"], f["title"], pretty(f["col"])) + PHOTO_HEADERS:
+    for f in pics:                                   # phir har photo ka apna label / title
+        for a in (f["label"], f["title"], pretty(f["col"])) + tuple(f.get("alts", [])):
+            pic_hdr.setdefault(norm(a), f)
+    for f in pics[:1]:                               # aakhir mein aam naam (Photo, Image ...) pehli photo ke liye
+        for a in PHOTO_HEADERS:
             pic_hdr.setdefault(norm(a), f)
     try:
         lines = read_sheet(up.getvalue(), up.name)
@@ -2775,19 +2786,27 @@ def excel_upload(db, table: str, cols: list[dict]):
         return
     folder = {f["col"]: f["folder"] for f in pics}
     done_i = done_u = fail_u = 0
+    _up = {}
+
+    def up_once(fobj, fold):
+        """Ek photo kai entries mein ho to Storage mein ek hi baar jaye."""
+        k = (getattr(fobj, "name", id(fobj)), fold)
+        if k not in _up:
+            _up[k] = save_image(db, fobj, fold)
+        return _up[k]
     try:
         with st.spinner("Save ho raha hai... Pls Wait"):
             ins = []
             for row, ph in new:
                 for c, v in ph.items():
-                    row[c] = v if isinstance(v, str) else save_image(db, v, folder[c])
+                    row[c] = v if isinstance(v, str) else up_once(v, folder[c])
                 ins.append(row)
             if ins:
                 db.insert_many(table, ins)
                 done_i = len(ins)
             for old, diff, ph in upd:
                 for c, v in ph.items():
-                    diff[c] = v if isinstance(v, str) else save_image(db, v, folder[c])
+                    diff[c] = v if isinstance(v, str) else up_once(v, folder[c])
                 if mod:
                     diff[mod["column_name"]] = modify_value(mod)
                 if db.update(table, id_col, old[id_col], diff, log_action="Excel Upload (Update)"):
