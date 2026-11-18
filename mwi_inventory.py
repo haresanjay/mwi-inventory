@@ -1253,7 +1253,7 @@ def backup_sidebar(db):
     """💾 Sabhi tables ki ek Excel file (har table ki alag sheet)."""
     with st.sidebar:
         st.header("💾 Backup")
-        if st.button("💾 Backup Excel banayein", use_container_width=True, key="bk_make"):
+        if st.button("💾 Backup Excel", use_container_width=True, key="bk_make"):
             try:
                 with st.spinner("Backup ban raha hai... Pls Wait"):
                     buf = io.BytesIO()
