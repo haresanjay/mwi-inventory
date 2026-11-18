@@ -358,6 +358,9 @@ def save_settings(data: dict):
 
 
 # ------------------------------------------------------------------ Supabase REST
+LOG_TABLE = "Activity_Log"
+
+
 class Supabase:
     def __init__(self, url: str, key: str, user: str = ""):
         self.root = url.rstrip("/")
@@ -443,24 +446,48 @@ class Supabase:
                 return out
             start += page
 
-    def update(self, table: str, id_col: str, id_val, row: dict):
+    # ---- Log (kisne, kab, kya kiya) – Activity_Log table mein. Log na ho paye to app nahi rukti.
+    def log(self, action: str, table: str = "", entry_id=None, details=None):
+        if table == LOG_TABLE:
+            return
+        try:
+            body = {"User_Name": self.user or None, "Action": action, "Table_Name": table or None,
+                    "Entry_ID": None if entry_id is None else str(entry_id),
+                    "Details": None if details is None else
+                    (details if isinstance(details, str) else
+                     json.dumps(details, ensure_ascii=False, default=str))[:4000]}
+            requests.post(self.base + LOG_TABLE, headers={**self.h, "Prefer": "return=minimal"},
+                          json=body, timeout=8)
+        except Exception:
+            pass
+
+    def update(self, table: str, id_col: str, id_val, row: dict, log_action: str = "Edit"):
         """Ek entry (id se) badalta hai. Badli hui rows lautata hai ([] = permission nahi/entry nahi)."""
         row = self._stamp(table, row, "modify")
         h = {**self.h, "Prefer": "return=representation"}
-        return self._check(requests.patch(self.base + table, headers=h,
-                                          params={id_col: f"eq.{id_val}"}, json=row, timeout=20))
+        out = self._check(requests.patch(self.base + table, headers=h,
+                                         params={id_col: f"eq.{id_val}"}, json=row, timeout=20))
+        if out:
+            self.log(log_action, table, id_val, row)
+        return out
 
     def delete(self, table: str, id_col: str, id_val):
         """Ek entry (id se) mitata hai. Miti hui rows lautata hai ([] = permission nahi/entry nahi)."""
         h = {**self.h, "Prefer": "return=representation"}
-        return self._check(requests.delete(self.base + table, headers=h,
-                                           params={id_col: f"eq.{id_val}"}, timeout=20))
+        out = self._check(requests.delete(self.base + table, headers=h,
+                                          params={id_col: f"eq.{id_val}"}, timeout=20))
+        if out:                                       # miti hui entry poori log mein (wapas laane ke kaam aaye)
+            self.log("Delete", table, id_val, out[0] if isinstance(out, list) else out)
+        return out
 
     def insert(self, table: str, row: dict):
         row = self._stamp(table, row, "create")
-        h = {**self.h, "Prefer": "return=minimal"}
-        return self._check(requests.post(self.base + table, headers=h,
-                                         json=row, timeout=20))
+        h = {**self.h, "Prefer": "return=representation"}
+        out = self._check(requests.post(self.base + table, headers=h,
+                                        json=row, timeout=20))
+        new = out[0] if isinstance(out, list) and out else {}
+        self.log("New Entry", table, new.get("id") if isinstance(new, dict) else None, row)
+        return out
 
     def insert_many(self, table: str, rows: list[dict], chunk: int = 500):
         """Bahut saari entries ek saath (500-500 karke)."""
@@ -470,6 +497,7 @@ class Supabase:
             self._check(requests.post(self.base + table, headers=h,
                                       params={"columns": ",".join(sorted({k for r in rows for k in r}))},
                                       json=rows[i:i + chunk], timeout=60))
+        self.log("Excel Upload (Insert)", table, None, f"{len(rows)} entries daali")
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -1249,6 +1277,47 @@ def filter_rows(table: str, cols: list[dict], rows: list[dict]) -> list[dict]:
     return out
 
 
+def log_view(db):
+    """📜 Log: kisne, kab, kya kiya (sirf Admin)."""
+    try:
+        rows = db.select_all(LOG_TABLE, {"select": "*", "order": "id.desc"})
+    except Exception as e:
+        if "404" in str(e) or "PGRST205" in str(e) or "does not exist" in str(e):
+            st.info("Log table abhi nahi bani – Supabase mein **activity_log_setup.sql** chalayein.")
+        else:
+            st.error(f"Log nahi padh saka: {e}")
+        return
+    if not rows:
+        st.info("Abhi tak koi log nahi.")
+        return
+    df = pd.DataFrame(rows)
+    t = pd.to_datetime(df.get("created_at"), utc=True, errors="coerce").dt.tz_convert(IST)
+    df.insert(0, "Samay", t.dt.strftime("%d-%m-%Y %I:%M:%S %p"))
+    df["_d"] = t.dt.date
+    c1, c2, c3, c4 = st.columns(4)
+    users = c1.multiselect("User", sorted(df["User_Name"].dropna().unique()), key="log_u")
+    acts = c2.multiselect("Kya kiya", sorted(df["Action"].dropna().unique()), key="log_a")
+    tabs_ = c3.multiselect("Table", sorted(df["Table_Name"].dropna().unique()), key="log_t")
+    day = c4.date_input("Tarikh", value=None, format="DD/MM/YYYY", key="log_d")
+    q = st.text_input("Details mein khojein", key="log_q")
+    if users:
+        df = df[df["User_Name"].isin(users)]
+    if acts:
+        df = df[df["Action"].isin(acts)]
+    if tabs_:
+        df = df[df["Table_Name"].isin(tabs_)]
+    if day:
+        df = df[df["_d"] == day]
+    if q and q.strip():
+        df = df[df["Details"].fillna("").str.contains(q.strip(), case=False, regex=False)]
+    show = df[["Samay", "User_Name", "Action", "Table_Name", "Entry_ID", "Details"]].rename(columns={
+        "User_Name": "User", "Action": "Kya kiya", "Table_Name": "Table", "Entry_ID": "Entry id"})
+    st.caption(f"Log entries: {len(show):,}")
+    st.dataframe(show, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Log Excel (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"MWI_Log_{now_ist():%d-%m-%Y}.csv", mime="text/csv", key="log_dl")
+
+
 def backup_sidebar(db):
     """💾 Sabhi tables ki ek Excel file (har table ki alag sheet)."""
     with st.sidebar:
@@ -1280,6 +1349,7 @@ def backup_sidebar(db):
                     st.session_state["bk_data"] = buf.getvalue()
                     st.session_state["bk_name"] = f"MWI_Backup_{now_ist():%d-%m-%Y_%H%M}.xlsx"
                     st.session_state["bk_info"] = ",  ".join(counts)
+                    db.log("Backup", "", None, st.session_state["bk_info"])
             except Exception as e:
                 st.error(f"Backup nahi bana: {e}")
         if st.session_state.get("bk_data"):
@@ -1778,7 +1848,7 @@ def photo_update_box(db, table: str, cols: list[dict], df, idx, pics: list[dict]
             try:
                 with st.spinner("Photo save ho rahi hai... Pls Wait"):
                     url = save_image(db, up, f["folder"])
-                    done = db.update(table, id_col, int(row_id), {pcol: url})
+                    done = db.update(table, id_col, int(row_id), {pcol: url}, log_action="Photo Update")
                 if done:
                     st.session_state[msg_key] = ("ok", f"✔ Photo Saved – entry id {row_id}")
                     st.session_state[f"{table}_pu_ver"] = ver + 1      # box khaali
@@ -1884,6 +1954,16 @@ def is_admin() -> bool:
     return roles.get(st.session_state.get("login_user", ""), "operator") == "admin"
 
 
+def quick_log(action: str, user: str, details=None):
+    """Login / Logout ka log (us samay database object nahi hota)."""
+    url, key = cloud_secrets()
+    if not (url and key):
+        s = load_settings()
+        url, key = s.get("url", ""), s.get("key", "")
+    if url and key and looks_like_key(key):
+        Supabase(url, key, user).log(action, details=details)
+
+
 def login_gate() -> bool:
     """App khulte hi pehle User + Password."""
     users = app_users()
@@ -1892,6 +1972,7 @@ def login_gate() -> bool:
             st.markdown(f"👤 **{st.session_state['login_user']}**  ·  "
                         + ("🛡️ Admin" if is_admin() else "🧑‍💼 Operator"))
             if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+                quick_log("Logout", st.session_state.get("login_user", ""))
                 st.session_state.pop("login_user", None)
                 st.rerun()
         return True
@@ -1906,7 +1987,9 @@ def login_gate() -> bool:
             name = u.strip().lower()
             if name in users and _pw_ok(pw, users[name]):
                 st.session_state["login_user"] = name
+                quick_log("Login", name)
                 st.rerun()
+            quick_log("Login Failed", name or "(khaali)", details="Galat User ya Password")
             st.error("User ya Password galat hai")
     return False
 
@@ -2293,7 +2376,7 @@ def excel_upload(db, table: str, cols: list[dict]):
                     diff[c] = v if isinstance(v, str) else save_image(db, v, folder[c])
                 if mod:
                     diff[mod["column_name"]] = modify_value(mod)
-                if db.update(table, id_col, old[id_col], diff):
+                if db.update(table, id_col, old[id_col], diff, log_action="Excel Upload (Update)"):
                     done_u += 1
                 else:
                     fail_u += 1
@@ -2339,7 +2422,11 @@ def main():
     st.markdown("**Total Entries**")
     st.markdown(_card_row(counts), unsafe_allow_html=True)
 
-    tabs = st.tabs(list(TABLES.values()))
+    names = list(TABLES.values()) + (["📜 Log"] if is_admin() else [])
+    tabs = st.tabs(names)
+    if is_admin():
+        with tabs[-1]:
+            log_view(db)
     for tab, table in zip(tabs, TABLES):
         with tab:
             try:
