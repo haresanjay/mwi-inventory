@@ -1234,14 +1234,14 @@ def filter_rows(table: str, cols: list[dict], rows: list[dict]) -> list[dict]:
     active = any(st.session_state.get(f"{k}_{x}") not in (None, "", [])
                  for x in ("from", "to", "q")) or any(
         st.session_state.get(f"{k}_v_{l}") for l in FILTER_LABELS.get(table, []))
-    with st.expander("🔍 Filter / Khojein" + ("  (chalu hai)" if active else ""), expanded=active):
+    with st.expander("🔍 Filter / Find" + ("  (chalu hai)" if active else ""), expanded=active):
         c1, c2, c3 = st.columns([2, 1, 1])
         dcol = None
         if dates:
-            dcol = c1.selectbox("Tarikh ka field", dates, key=f"{k}_dcol",
+            dcol = c1.selectbox("Date", dates, key=f"{k}_dcol",
                                 format_func=lambda c: labels.get(c, pretty(c)))
-            d_from = c2.date_input("Se", value=None, format="DD/MM/YYYY", key=f"{k}_from")
-            d_to = c3.date_input("Tak", value=None, format="DD/MM/YYYY", key=f"{k}_to")
+            d_from = c2.date_input("From", value=None, format="DD/MM/YYYY", key=f"{k}_from")
+            d_to = c3.date_input("End", value=None, format="DD/MM/YYYY", key=f"{k}_to")
         flts = [l for l in FILTER_LABELS.get(table, []) if by_label.get(l)]
         picks = {}
         if flts:
@@ -1251,7 +1251,7 @@ def filter_rows(table: str, cols: list[dict], rows: list[dict]) -> list[dict]:
                 opts = sorted({_txt(r.get(col)) for r in rows if _txt(r.get(col))},
                               key=lambda x: (len(x), x) if x.isdigit() else (99, x.lower()))
                 picks[col] = fc[i].multiselect(l, opts, key=f"{k}_v_{l}")
-        q = st.text_input("Kuch bhi likh kar khojein (Invoice No, naam, number…)", key=f"{k}_q")
+        q = st.text_input("Any Item to Find (Invoice No, Name, Number…)", key=f"{k}_q")
 
     out = rows
     if dcol:
