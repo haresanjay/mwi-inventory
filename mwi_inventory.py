@@ -1886,25 +1886,21 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
     groups["_n"] = pd.to_numeric(groups["k_ac"], errors="coerce")
     groups = groups.sort_values(["k_dist", "_n", "k_ac"])
 
-    def cards(dist, acname, acno, parts, pages, both, single, style=False):
+    def dcards(dist, n_ac, parts, pages, both, single, style=False):
         return _card_row([(n, v, style) for n, v in [
-            ("District Name", dist or "–"), ("Ac Name", acname or "–"), ("Ac No", acno or "–"),
+            ("District Name", dist), ("Total AC", f"{int(n_ac):,}"),
             ("Total Parts", f"{int(parts):,}"), ("Total Side Print", f"{int(pages):,}"),
             ("Both Side", f"{int(both):,}"), ("Single Side", f"{int(single):,}"),
             ("Total Used Paper Sheet (Both + Single)", f"{int(both) + int(single):,}")]])
 
     st.markdown("**Grand Total**")
     html = []
-    for kd, part in groups.groupby("k_dist", sort=True):
-        for r in part.itertuples():
-            html.append(cards(r.dist, r.acname, r.acno, r.parts, r.pages, r.both, r.single))
-        if len(part) > 1:                    # District ka jod (neela)
-            html.append(cards(f"{part['dist'].iloc[0] or '–'} TOTAL", f"{len(part)} AC", "–",
-                              part.parts.sum(), part.pages.sum(), part.both.sum(), part.single.sum(), "dist"))
-        html.append('<div style="height:6px"></div>')
+    for kd, part in groups.groupby("k_dist", sort=True):     # sirf District ka jod
+        html.append(dcards(part["dist"].iloc[0] or "–", len(part),
+                           part.parts.sum(), part.pages.sum(), part.both.sum(), part.single.sum()))
     if groups["k_dist"].nunique() > 1:       # sabka jod (hara)
-        html.append(cards(f"GRAND TOTAL ({groups['k_dist'].nunique()} District)", f"{len(groups)} AC", "–",
-                          groups.parts.sum(), groups.pages.sum(), groups.both.sum(), groups.single.sum(), "grand"))
+        html.append(dcards(f"GRAND TOTAL ({groups['k_dist'].nunique()} District)", len(groups),
+                           groups.parts.sum(), groups.pages.sum(), groups.both.sum(), groups.single.sum(), "grand"))
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
