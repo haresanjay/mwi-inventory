@@ -56,6 +56,7 @@ TABLES = {
     "Toner": "🖨️ Toner",
     "Attendance": "🕘 Attendance",
     "Stock": "📦 Stock",
+    "Scanning": "🖨 Scanning",
 }
 
 # Kis table ke kis column mein photo aayegi (column naam chhote/bade akshar se farq nahi padta)
@@ -188,6 +189,23 @@ FIELD_ORDER = {
             F("Amount", ["amount", "amount_rs", "toner_amount"], "Amount", "numeric"),
             F("Invoice Total (GST)", ["invoice_total_gst", "invoice_total", "invoice_total_rs_gst_sahit",
                                       "amount_with_gst", "total_gst", "bill_total"], "Invoice_Total_GST", "numeric"),
+        ],
+    },
+    "Scanning": {
+        "first": [
+            F("Client", ["client", "client_name", "department", "party_name"], "Client", "text"),
+            F("Work Order No", ["work_order_no", "work_order", "wo_no"], "Work_Order_No", "text"),
+            F("Scan Date", ["scan_date", "date", "work_date"], "Scan_Date", "date"),
+            F("A4 Pages", ["a4_pages", "a4_size_page", "a_4_size_page", "pages", "page", "total_pages"],
+              "A4_Pages", "integer"),
+            F("Rate", ["rate", "rate_per_page", "rate_page"], "Rate", "numeric"),
+            F("Amount", ["amount", "amount_rs"], "Amount", "numeric"),
+            F("Invoice No", ["invoice_no", "invoice_number", "bill_no"], "Invoice_No", "text"),
+            F("Invoice Date", ["invoice_date", "bill_date"], "Invoice_Date", "date"),
+            F("Payment Status", ["payment_status", "status"], "Payment_Status", "text"),
+            F("Payment Date", ["payment_date", "paid_date"], "Payment_Date", "date"),
+            F("UTR No", ["utr_no", "utr"], "UTR_No", "text"),
+            F("Remark", ["remark", "remarks", "note"], "Remark", "text"),
         ],
     },
     "Stock": {
@@ -353,6 +371,11 @@ CALC["PDF_DETAIL"] = [
      "fn": lambda td, ts, lz: td + (ts or 0) + (lz or 0), "desc": "Total Double + Total Single + Laser"},
     {"target": "Carton", "uses": ["Billing Page"],
      "fn": lambda bp: round(bp / 5000, 4), "desc": "Billing Page ÷ 5000"},
+]
+
+CALC["Scanning"] = [
+    {"target": "Amount", "uses": ["A4 Pages", "Rate"],
+     "fn": lambda p, r: None if r is None else round(p * r, 2), "desc": "A4 Pages × Rate"},
 ]
 
 CALC["Stock"] = [
@@ -1287,6 +1310,7 @@ FILTER_LABELS = {
     "Toner": ["Toner Company", "Party Name"],
     "Attendance": ["Name", "Status", "Department"],
     "Stock": ["Item Type", "Item Name", "GSM"],
+    "Scanning": ["Client", "Invoice No", "Payment Status"],
 }
 
 
@@ -1543,7 +1567,8 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     if sc:
         {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
          "PDF_DETAIL": pdf_summary, "Toner": toner_summary,
-         "Attendance": attendance_summary, "Stock": stock_summary}[table](db, table, sc, rows=rows)
+         "Attendance": attendance_summary, "Stock": stock_summary,
+         "Scanning": scanning_summary}[table](db, table, sc, rows=rows)
 
     if edit_section(db, table, cols, df, rows, sel_rows):
         return                                     # edit chal raha hai: neeche ka hissa chhupa
@@ -1596,6 +1621,9 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
                         "bal": "Balance Paper Qty"},
         "Attendance": {"emp": "Employee ID", "name": "Name", "date": "Date", "hours": "Work Hours",
                        "status": "Status", "tin": "In Time", "tout": "Out Time"},
+        "Scanning": {"client": "Client", "date": "Scan Date", "pages": "A4 Pages", "rate": "Rate",
+                     "amt": "Amount", "inv": "Invoice No", "idate": "Invoice Date", "pstat": "Payment Status",
+                     "pdate": "Payment Date"},
         "Stock": {"date": "Stock Date", "type": "Item Type", "qty": "Total Qty", "ctn": "Total Carton",
                   "sheet": "Total Sheet", "kg": "Total Kg"},
         "Toner": {"qty": "Toner Qty", "used": "Toner Used", "bal": "Toner Balance Qty",
@@ -1695,6 +1723,41 @@ def attendance_summary(db, table: str, sc: dict, rows=None):
           [["Month", "Name", "Days In", "Present (In+Out)", "Out Missing", "Total Hours"]])
     st.markdown("**Grand Total**")
     st.dataframe(t, use_container_width=True, hide_index=True)
+
+
+def scanning_summary(db, table: str, sc: dict, rows=None):
+    """Scanning: Invoice-wise (period) pages, din, amount aur payment + sabka jod."""
+    df = _all_rows(db, table, sc, rows)
+    if df is None:
+        return
+    txt = lambda k: (df[sc[k]].fillna("").astype(str).str.strip() if sc.get(k) in df.columns
+                     else pd.Series("", index=df.index))
+    d = pd.to_datetime(df[sc["date"]], errors="coerce") if sc.get("date") in df.columns else pd.Series(pd.NaT, index=df.index)
+    g = pd.DataFrame({"client": txt("client"), "inv": txt("inv").replace("", "(Bill baaki)"), "d": d,
+                      "pages": _num(df, sc.get("pages")), "amt": _num(df, sc.get("amt")),
+                      "pstat": txt("pstat"), "pdate": txt("pdate")})
+    t = (g.groupby(["client", "inv"], as_index=False)
+          .agg(From=("d", "min"), To=("d", "max"), Days=("d", "nunique"), Pages=("pages", "sum"),
+               Amount=("amt", "sum"), Status=("pstat", lambda x: next((v for v in x if v), "")),
+               Paid_On=("pdate", lambda x: next((v for v in x if v), ""))))
+    t = t.sort_values("From", ascending=False)
+    t["Amount"] = t["Amount"].round()
+    paid = t["Status"].str.lower().eq("paid")
+    st.markdown("**Grand Total**")
+    st.markdown(_card_row([
+        ("Total Pages", f"{int(t.Pages.sum()):,}"), ("Working Days", f"{int(g['d'].nunique()):,}"),
+        ("Total Bills", f"{(t.inv != '(Bill baaki)').sum():,}"), ("Amount", f"₹ {int(t.Amount.sum()):,}"),
+        ("Paid Amount", f"₹ {int(t.loc[paid, 'Amount'].sum()):,}"),
+        ("Pending Amount", f"₹ {int(t.loc[~paid, 'Amount'].sum()):,}", bool((~paid).any())),
+    ]), unsafe_allow_html=True)
+    show = t.rename(columns={"client": "Client", "inv": "Invoice No", "Paid_On": "Payment Date",
+                             "Status": "Payment Status"})
+    for c in ("From", "To"):
+        show[c] = show[c].dt.strftime("%d-%m-%Y")
+    pdt = pd.to_datetime(show["Payment Date"], errors="coerce")
+    show["Payment Date"] = pdt.dt.strftime("%d-%m-%Y").where(pdt.notna(), show["Payment Date"])
+    show["Pages"] = show["Pages"].astype(int)
+    st.dataframe(show, use_container_width=True, hide_index=True)
 
 
 def stock_summary(db, table: str, sc: dict, rows=None):
@@ -2449,6 +2512,7 @@ UPLOAD_KEYS = {
     "Machine_Counter": ["Machine No", "Reading Start Date"],
     "Attendance": ["Employee ID", "Date"],
     "Stock": ["Stock Date", "Item Type", "Packing", "Item Name", "GSM"],
+    "Scanning": ["Client", "Scan Date"],
 }
 PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
 
