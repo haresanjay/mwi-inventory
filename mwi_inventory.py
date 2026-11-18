@@ -1594,16 +1594,19 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
-def _card(name, v):
-    return (f'<div style="flex:1 1 130px;min-width:0;padding:8px 12px;border:1px solid '
-            f'rgba(128,128,128,.35);border-radius:8px"><div style="font-size:.85rem;opacity:.75">'
+def _card(name, v, yellow=False):
+    box = ("background:#FFE066;color:#000;border:1px solid #E0B800" if yellow
+           else "border:1px solid rgba(128,128,128,.35)")
+    return (f'<div style="flex:1 1 130px;min-width:0;padding:8px 12px;{box};border-radius:8px">'
+            f'<div style="font-size:.85rem;opacity:.75">'
             f'{name}</div><div style="font-size:clamp(1rem,1.6vw,1.35rem);font-weight:600;'
             f'overflow-wrap:anywhere;line-height:1.3">{v}</div></div>')
 
 
 def _card_row(cards: list[tuple]) -> str:
+    """cards: (naam, value) ya (naam, value, True) – True = peela card."""
     return ('<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px">'
-            + "".join(_card(n, v) for n, v in cards) + "</div>")
+            + "".join(_card(*c) for c in cards) + "</div>")
 
 
 def _all_rows(db, table: str, sc: dict, rows=None):
@@ -1633,7 +1636,7 @@ def paper_summary(db, table: str, sc: dict, rows=None):
     st.markdown("**Grand Total**")
     st.markdown(_card_row([
         ("No of Paper", f"{int(round(_num(df, sc.get('nop')).sum())):,}"),
-        ("Consumption Paper", f"{int(round(_num(df, sc.get('cons')).sum())):,}"),
+        ("Consumption Paper", f"{int(round(_num(df, sc.get('cons')).sum())):,}", True),
         ("Balance Paper Qty", f"{int(round(_num(df, sc.get('bal')).sum())):,}"),
     ]), unsafe_allow_html=True)
 
@@ -1819,7 +1822,7 @@ def toner_summary(db, table: str, sc: dict, rows=None):
         return ("-" if neg else "") + "₹ " + w + (f".{int(paise):02d}" if paise else "")
     cards = [
         ("Toner Qty", f"{int(round(_num(df, sc.get('qty')).sum())):,}"),
-        ("Toner Used", f"{int(round(_num(df, sc.get('used')).sum())):,}"),
+        ("Toner Used", f"{int(round(_num(df, sc.get('used')).sum())):,}", True),
         ("Toner Balance Qty", f"{int(round(_num(df, sc.get('bal')).sum())):,}"),
     ]
     if sc.get("amt") in df.columns:
