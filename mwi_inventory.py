@@ -2546,20 +2546,24 @@ def _key(v):
 
 
 # Excel ki entry kis purani entry ki "wahi entry" hai – in field se pehchaan (label)
-UPLOAD_KEYS = {
-    "Paper_Table": ["Invoice No", "Paper Company", "Qty Rim"],
-    "Toner": ["Invoice No", "Toner Qty"],
+UPLOAD_KEYS = {          # Excel ki line kis purani entry ki "wahi entry" hai – in field se pehchaan (kram se)
+    "Paper_Table": [["Invoice No", "Paper Company", "Qty Rim"], ["Invoice No", "Paper Company"],
+                    ["Paper Received Date", "Paper Company", "Qty Rim"]],
+    "Toner": [["Invoice No", "Toner Qty"], ["Invoice No", "Toner Company"],
+              ["Toner Received Date", "Toner Qty"]],
     "PDF_DETAIL": [["Roll Type", "Publish Date", "Ac No", "Part No"],
                    ["Roll Type", "Publish Date", "District Name", "Ac No"],
                    ["Publish Date", "Ac No", "Part No"], ["Publish Date", "District Name", "Ac No"],
                    ["Roll Type", "Ac No", "Part No"], ["Roll Type", "District Name", "Ac No"],
                    ["Ac No", "Part No"], ["District Name", "Ac No"]],   # har Roll + tarikh alag
-    "Machine_Parts": [["Supplier", "Invoice No", "Sr No", "Parts Name"], ["Invoice No", "Sr No", "Parts Name"],
-                      ["Sr No", "Parts Name", "Model Number"]],   # bill ki line alag, stock list alag
-    "Machine_Counter": ["Machine No", "Reading Start Date"],
-    "Attendance": ["Employee ID", "Date"],
-    "Paper_Toner_Stock": ["Stock Date", "Item Type", "Packing", "Item Name", "GSM"],
-    "Scanning": ["Client", "Scan Date"],
+    "Machine_Parts": [["Supplier", "Invoice No", "Sr No", "Parts Name"],
+                      ["Sr No", "Parts Name", "Qty", "Price"],          # pehle bina bill ke daali wahi line
+                      ["Sr No", "Parts Name", "Model Number"]],
+    "Machine_Counter": [["Machine No", "Reading Start Date"], ["Serial No", "Reading Start Date"]],
+    "Attendance": [["Employee ID", "Date"], ["Name", "Date"]],
+    "Paper_Toner_Stock": [["Stock Date", "Item Type", "Packing", "Item Name", "GSM"],
+                          ["Stock Date", "Item Type", "Item Name", "GSM"], ["Stock Date", "Item Name"]],
+    "Scanning": [["Client", "Scan Date"], ["Invoice No", "Scan Date"], ["Scan Date"]],
 }
 PHOTO_HEADERS = ("photo", "photofile", "photoname", "image", "pic", "invoicephoto", "billphoto")
 
@@ -2694,20 +2698,30 @@ def excel_upload(db, table: str, cols: list[dict]):
     sets = UPLOAD_KEYS.get(table, [])
     if sets and not isinstance(sets[0], list):
         sets = [sets]
-    key_cols, use_keys = [], False
-    for ks in sets:                                  # pehla aisa set jiske sab field Excel mein hon
+    usable = []                                      # jin set ke sab field Excel mein hain (kram se)
+    for ks in sets:
         kc = [by_label.get(k) for k in ks]
         if all(kc) and all(any(k in r for r, _ in rows) for k in kc):
-            key_cols, use_keys = kc, bool(id_col)
-            break
+            usable.append(kc)
+    use_keys = bool(usable) and bool(id_col)
+    key_cols = usable[0] if usable else []
     try:
         have = db.select_all(table, {"select": "*"})
     except Exception:
         have = []
-    idx = {}
+    idxs = []
     if use_keys:
-        for h in have:
-            idx.setdefault(tuple(_key(h.get(k)) for k in key_cols), h)
+        # pehla set: poori pehchaan. Baad ke set: sirf un purani entries se milao jinmein pehle set ke
+        # baaki field (jaise Supplier / Invoice No) KHAALI hain – taaki pehle bina bill ke daali gayi
+        # wahi entry update ho, kisi doosre bill ki entry nahi.
+        for n, kc in enumerate(usable):
+            extra = [k for k in key_cols if k not in kc] if n else []
+            ix = {}
+            for h in have:
+                if any(_key(h.get(k)) for k in extra):
+                    continue
+                ix.setdefault(tuple(_key(h.get(k)) for k in kc), []).append(h)
+            idxs.append((kc, ix))
     else:
         allc = sorted({k for r, _ in rows for k in r}, key=lambda c: list(meta).index(c))
         seen = {tuple(_key(h.get(c)) for c in allc) for h in have}
@@ -2717,8 +2731,18 @@ def excel_upload(db, table: str, cols: list[dict]):
     calc_t = {r["t_col"] for r in rules} | {t for t, u, fn in fills if t}
     mod = next((c for c in cols if is_modify_col(c["column_name"])), None)
     new, upd, same, missing_ph = [], [], 0, set()
+    taken = set()                                    # ek purani entry sirf ek Excel line se mile
+
+    def find_old(row):
+        for kc, ix in idxs:
+            for h in ix.get(tuple(_key(row.get(k)) for k in kc), []):
+                if h.get(id_col) not in taken:
+                    taken.add(h.get(id_col))
+                    return h
+        return None
+
     for row, pf in rows:
-        old = idx.get(tuple(_key(row.get(k)) for k in key_cols)) if use_keys else None
+        old = find_old(row) if use_keys else None
         if not use_keys and tuple(_key(row.get(c)) for c in allc) in seen:
             same += 1
             continue
@@ -2753,8 +2777,16 @@ def excel_upload(db, table: str, cols: list[dict]):
         else:
             same += 1
 
-    st.markdown(f"**Excel mein entries: {len(rows):,}**  |  nayi: **{len(new):,}**  |  "
-                f"update: **{len(upd):,}**  |  pehle jaisi (kuch nahi badla): **{same:,}**")
+    if use_keys:
+        st.caption("🔑 Same entry ki pehchaan: " + "  →  ".join(" + ".join(lbl(c) for c in kc) for kc, _ in idxs))
+    else:
+        st.caption("🔑 Is Excel mein pehchaan wale field nahi mile – sirf bilkul same entry dobara nahi dalegi.")
+    st.markdown(_card_row([
+        ("Excel mein entries", f"{len(rows):,}"),
+        ("⚪ Pehle wali (same – kuch nahi badla)", f"{same:,}"),
+        ("🟢 New (nayi dalegi)", f"{len(new):,}", "grand" if new else False),
+        ("🟡 Update (purani mein badlav)", f"{len(upd):,}", True if upd else False),
+    ]), unsafe_allow_html=True)
     if bad:
         with st.expander(f"⚠️ {len(bad)} line(s) chhodi gayi"):
             for b in bad[:200]:
@@ -2763,12 +2795,12 @@ def excel_upload(db, table: str, cols: list[dict]):
         st.caption(f"📷 {len(missing_ph)} photo upar 'Photos' mein nahi chuni gayi (bina photo jayengi): "
                    + ", ".join(sorted(missing_ph)[:10]) + (" …" if len(missing_ph) > 10 else ""))
     if new:
-        st.markdown("**➕ Nayi entries**")
+        st.markdown("**🟢 New – nayi entries**")
         show = sorted({k for r, _ in new for k in r}, key=lambda c: list(meta).index(c))
         st.dataframe(pd.DataFrame([r for r, _ in new])[show].rename(columns=lbl).head(500),
                      use_container_width=True, hide_index=True)
     if upd:
-        st.markdown("**✏️ Update hongi (sirf badli / khaali value)**")
+        st.markdown("**🟡 Update – purani entry mein ye badlega**")
         st.dataframe(pd.DataFrame([
             {**{lbl(k): o.get(k) for k in key_cols},
              "Badlav": ",  ".join([f"{lbl(c)}: {o.get(c) if o.get(c) not in (None, '') else '–'} → {v}"
@@ -2776,11 +2808,11 @@ def excel_upload(db, table: str, cols: list[dict]):
                                   + [f"{c}: photo" for c in p])}
             for o, d, p in upd[:500]]), use_container_width=True, hide_index=True)
     if not new and not upd:
-        st.info("Sabhi entries pehle se table mein hain – kuch nahi badla.")
+        st.info("⚪ Sabhi entries pehle wali (same) hain – kuch nahi badla, kuch nahi dalega.")
         return
 
     go = f"{table}_upgo_flag"
-    st.button(f"📥 {len(new):,} Insert + {len(upd):,} Update", type="primary", key=f"{table}_upgo{ver}",
+    st.button(f"📥 Upload: {len(new):,} New + {len(upd):,} Update", type="primary", key=f"{table}_upgo{ver}",
               on_click=lambda: st.session_state.__setitem__(go, True))
     if not st.session_state.pop(go, False):
         return
@@ -2813,7 +2845,8 @@ def excel_upload(db, table: str, cols: list[dict]):
                     done_u += 1
                 else:
                     fail_u += 1
-        m = f"✔ {done_i:,} nayi entries daali, {done_u:,} entries update ki"
+        m = (f"✔ Upload poora – 🟢 New: {done_i:,}  |  🟡 Update: {done_u:,}  |  "
+             f"⚪ Pehle wali (same): {same:,}")
         if fail_u:
             m = (f"❌ {fail_u} entries update nahi hui – Supabase mein 'edit_permission.sql' chalayein. "
                  f"({done_i} daali, {done_u} update hui)")
