@@ -1683,6 +1683,110 @@ def stock_summary(db, table: str, sc: dict, rows=None):
         t["Stock Date"] = t["Stock Date"].dt.strftime("%d-%m-%Y")
         st.caption("Har ginti ki tarikh ka stock:")
         st.dataframe(t.round(1), use_container_width=True, hide_index=True)
+    if is_admin() and db is not None:
+        stock_sync(db, last_d.date(), int(round(last["Paper Sheet"])), int(round(last["Toner Pkt"])))
+
+
+# Stock ki ginti se Paper / Toner table ka Balance milana
+SYNC = {
+    "Paper_Table": {"date": "Paper Received Date", "qty": "No of Paper", "used": "Consumption Paper",
+                    "bal": "Balance Paper Qty", "show": ["Invoice No", "Paper Company"], "unit": "Sheet"},
+    "Toner": {"date": "Toner Received Date", "qty": "Toner Qty", "used": "Toner Used",
+              "bal": "Toner Balance Qty", "show": ["Invoice No", "Toner Company"], "unit": "Pkt"},
+}
+
+
+def sync_plan(db, table: str, stock_date, stock_qty: int):
+    """Purani entries se pehle kharch maan kar (FIFO): nayi entries mein Balance bachta hai,
+    kul Balance = gina hua stock. Stock ki tarikh ke baad aayi entries ko nahi chhoota."""
+    conf = SYNC[table]
+    cols = db.columns(table)
+    _, labels, _ = arrange_fields(table, [c for c in cols if not c["is_auto"]])
+    by = {l: c for c, l in labels.items()}
+    need = [by.get(conf[k]) for k in ("date", "qty", "used", "bal")]
+    if not all(need[1:3]):
+        return None, f"{table} mein {conf['qty']} / {conf['used']} column nahi mile"
+    dcol, qcol, ucol, bcol = need
+    id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
+    rows = db.select_all(table, {"select": "*"})
+    def d(r):
+        t = pd.to_datetime(r.get(dcol), errors="coerce") if dcol else pd.NaT
+        return t.date() if not pd.isna(t) else date.min
+    upto = sorted([r for r in rows if d(r) <= stock_date and _num0(r.get(qcol))],
+                  key=lambda r: (d(r), r.get(id_col) or 0), reverse=True)      # nayi pehle
+    left, plan = stock_qty, []
+    for r in upto:
+        q = int(round(_num0(r[qcol])))
+        keep = max(0, min(q, left))
+        left -= keep
+        new_used = q - keep
+        old_used = int(round(_num0(r.get(ucol)) or 0))
+        old_bal = _num0(r.get(bcol)) if bcol else None
+        if new_used != old_used or (bcol and old_bal != keep):
+            plan.append({"id": r[id_col], "date": d(r), "qty": q, "old_used": old_used, "new_used": new_used,
+                         "bal": keep, **{k: r.get(by.get(k)) for k in conf["show"]}})
+    total_q = sum(int(round(_num0(r[qcol]))) for r in upto)
+    info = {"cols": (ucol, bcol, id_col), "left": left, "total_q": total_q, "n": len(upto)}
+    return plan, info
+
+
+def stock_sync(db, stock_date, paper_sheets: int, toner_pkt: int):
+    """📦 Stock ki ginti se Paper / Toner table ka Consumption / Used bhar kar Balance milana."""
+    with st.expander(f"🔄 Paper / Toner ka Balance is Stock ({stock_date:%d-%m-%Y}) se milayein"):
+        st.caption("Stock ki tarikh tak aayi entries mein se purani entries pehle kharch maani jayengi; "
+                   "nayi entries mein Balance bachega, taaki kul Balance = gina hua stock. "
+                   f"Paper: {paper_sheets:,} sheet,  Toner: {toner_pkt:,} pkt.")
+        plans = {}
+        for table, qty in (("Paper_Table", paper_sheets), ("Toner", toner_pkt)):
+            conf = SYNC[table]
+            try:
+                plan, info = sync_plan(db, table, stock_date, qty)
+            except Exception as e:
+                st.error(f"{TABLES[table]}: {e}")
+                continue
+            if plan is None:
+                st.warning(f"{TABLES[table]}: {info}")
+                continue
+            st.markdown(f"**{TABLES[table]}** – {info['n']} entries, kul aaya {info['total_q']:,} {conf['unit']}, "
+                        f"stock {qty:,} {conf['unit']}")
+            if info["left"] > 0:
+                st.warning(f"Stock ({qty:,}) kul aaye maal ({info['total_q']:,}) se {info['left']:,} zyada hai – "
+                           "kuch invoice entry baaki ho sakti hai. Sabhi entries ka Balance poora rahega.")
+            if not plan:
+                st.caption("✔ Pehle se mel khata hai – kuch badalna nahi.")
+                continue
+            plans[table] = (plan, info)
+            st.dataframe(pd.DataFrame([{
+                "Date": p["date"].strftime("%d-%m-%Y") if p["date"] != date.min else "",
+                **{k: p[k] for k in conf["show"]}, conf["qty"]: p["qty"],
+                f"{conf['used']} (abhi)": p["old_used"], f"{conf['used']} (naya)": p["new_used"],
+                f"{conf['bal']} (naya)": p["bal"]} for p in plan]), use_container_width=True, hide_index=True)
+        if not plans:
+            return
+        go = "stock_sync_go"
+        st.button(f"✅ {sum(len(p) for p, _ in plans.values())} entries ka Balance milayein", type="primary",
+                  key="stock_sync_btn", on_click=lambda: st.session_state.__setitem__(go, True))
+        if not st.session_state.pop(go, False):
+            return
+        done = fail = 0
+        with st.spinner("Update ho raha hai... Pls Wait"):
+            for table, (plan, info) in plans.items():
+                ucol, bcol, id_col = info["cols"]
+                mod = next((c for c in db.columns(table) if is_modify_col(c["column_name"])), None)
+                for p in plan:
+                    row = {ucol: p["new_used"]}
+                    if bcol:
+                        row[bcol] = p["bal"]
+                    if mod:
+                        row[mod["column_name"]] = modify_value(mod)
+                    if db.update(table, id_col, p["id"], row, log_action=f"Stock Se Balance ({stock_date:%d-%m-%Y})"):
+                        done += 1
+                    else:
+                        fail += 1
+        if fail:
+            st.error(f"❌ {fail} entries update nahi hui – 'edit_permission.sql' chalayein. ({done} hui)")
+        else:
+            st.success(f"✔ {done} entries update hui – ab Paper / Toner ka Balance stock ke barabar hai.")
 
 
 def toner_summary(db, table: str, sc: dict, rows=None):
