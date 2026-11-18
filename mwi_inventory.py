@@ -1968,7 +1968,7 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
             st.markdown(dcards(f"GRAND TOTAL ({gr['k_dist'].nunique()} District)", len(gr),
                                gr.parts.sum(), gr.pages.sum(), gr.both.sum(), gr.single.sum(), "grand",
                                x=gr), unsafe_allow_html=True)
-            with st.expander(f"📋 Sabhi AC ki detail ({len(gr)} AC)  {key}"):
+            with st.expander(f"📋 AC Detail ({len(gr)} AC)  {key}"):
                 ac_table(gr.assign(acname=gr["dist"] + " – " + gr["acname"]))
 
     # Har Roll (Draft / Final ...) ka alag Grand Total – nayi tarikh wala upar
