@@ -1491,6 +1491,17 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
         cfg[f["col"]] = st.column_config.ImageColumn(f["label"], width="small")
     grid_kw = dict(on_select="rerun", selection_mode="single-row",
                    key=f"{table}_grid_{st.session_state.get(f'{table}_gver', 0)}")
+    # Kharch (Consumption Paper / Toner Used) wale ank peele (yellow) mein
+    hl = [c for c, l in all_labels.items() if l in HIGHLIGHT.get(table, []) and c in view.columns]
+    if hl:
+        try:
+            def yellow(v):
+                n = None if v is None or pd.isna(v) else _num0(v)
+                return "background-color:#FFE066;color:#000;font-weight:600" if n not in (None, 0) else ""
+            sty = view.style
+            view = (sty.map if hasattr(sty, "map") else sty.applymap)(yellow, subset=hl)
+        except Exception:
+            pass
     try:
         ev = st.dataframe(view, use_container_width=True, hide_index=True, column_config=cfg, **grid_kw)
     except TypeError:                                  # purana Streamlit: row chunna nahi
@@ -1686,6 +1697,9 @@ def stock_summary(db, table: str, sc: dict, rows=None):
     if is_admin() and db is not None:
         stock_sync(db, last_d.date(), int(round(last["Paper Sheet"])), int(round(last["Toner Pkt"])))
 
+
+# List mein peele (yellow) dikhne wale kharch ke field
+HIGHLIGHT = {"Paper_Table": ["Consumption Paper"], "Toner": ["Toner Used"]}
 
 # Stock ki ginti se Paper / Toner table ka Balance milana
 SYNC = {
