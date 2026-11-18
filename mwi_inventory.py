@@ -18,6 +18,7 @@ import json
 import re
 import time as _time
 import uuid
+import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")   # India ka samay
@@ -2627,9 +2628,26 @@ def excel_upload(db, table: str, cols: list[dict]):
 
     photos = {}
     if photo_col:
-        ups = st.file_uploader("Photos (optional) – Excel mein likhe naam wali photos yahan chunein",
-                               type=IMG_TYPES, accept_multiple_files=True, key=f"{table}_upph{ver}")
-        photos = {Path(u.name).name.lower(): u for u in (ups if isinstance(ups, list) else [])}
+        ups = st.file_uploader("📷 Photos – Excel mein likhe naam wali photos (ya poori ZIP file) yahan chunein",
+                               type=IMG_TYPES + ["zip"], accept_multiple_files=True, key=f"{table}_upph{ver}")
+        for u in (ups if isinstance(ups, list) else []):
+            if Path(u.name).suffix.lower() == ".zip":
+                try:
+                    with zipfile.ZipFile(io.BytesIO(u.getvalue())) as z:
+                        for zi in z.infolist():
+                            nm = Path(zi.filename).name
+                            if zi.is_dir() or nm.startswith(".") or "__MACOSX" in zi.filename \
+                                    or Path(nm).suffix.lower().lstrip(".") not in IMG_TYPES:
+                                continue
+                            b = io.BytesIO(z.read(zi))
+                            b.name, b.size = nm, zi.file_size
+                            photos.setdefault(nm.lower(), b)
+                except zipfile.BadZipFile:
+                    st.warning(f"⚠️ {u.name} sahi ZIP file nahi hai.")
+            else:
+                photos[Path(u.name).name.lower()] = u
+        if photos:
+            st.caption(f"✔ {len(photos)} photo mili")
 
     fixed = {}
     others = [c for c in fields if c["column_name"] not in colmap.values()]
@@ -2792,7 +2810,7 @@ def excel_upload(db, table: str, cols: list[dict]):
             for b in bad[:200]:
                 st.caption(b)
     if missing_ph:
-        st.caption(f"📷 {len(missing_ph)} photo upar 'Photos' mein nahi chuni gayi (bina photo jayengi): "
+        st.warning(f"📷 {len(missing_ph)} photo upar '📷 Photos' mein nahi chuni gayi (ye bina photo jayengi): "
                    + ", ".join(sorted(missing_ph)[:10]) + (" …" if len(missing_ph) > 10 else ""))
     if new:
         st.markdown("**🟢 New – nayi entries**")
