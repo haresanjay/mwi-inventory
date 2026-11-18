@@ -1601,7 +1601,7 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
                        "page": "Total Pages", "parts": "Total Parts", "both": "Both Side",
                        "single": "Single Side", "td": "Total Double", "ts": "Total Single",
-                       "laser": "Laser", "bill": "Billing Page", "ctn": "Carton"},
+                       "laser": "Laser", "bill": "Billing Page", "ctn": "Carton", "set": "Set"},
     }.get(table)
     if not want:
         return {}
@@ -1900,9 +1900,10 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
         "parts": given("parts", pd.Series(1, index=df.index)),
         "both": given("both", page // 2), "single": given("single", page % 2),
         "td": _num(df, sc.get("td")), "ts": _num(df, sc.get("ts")), "laser": _num(df, sc.get("laser")),
-        "bill": _num(df, sc.get("bill")), "ctn": _num(df, sc.get("ctn")),
+        "bill": _num(df, sc.get("bill")), "ctn": _num(df, sc.get("ctn")), "set": _num(df, sc.get("set")),
     })
-    has_bill = sc.get("bill") in df.columns and g["bill"].sum() > 0
+    # table mein Set / Billing wale column hon to Grand Total mein dikhao
+    has_bill = any(sc.get(k) in df.columns for k in ("set", "td", "ts", "laser", "bill", "ctn"))
     g["k_dist"] = g["dist"].str.upper()
     g["k_ac"] = g["acno"].str.upper().str.replace(r"\.0+$", "", regex=True).str.lstrip("0")
     groups = (g.groupby(["k_dist", "k_ac"], as_index=False, sort=False)
@@ -1911,7 +1912,8 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
                     parts=("parts", "sum"), pages=("page", "sum"),
                     both=("both", "sum"), single=("single", "sum"),
                     td=("td", "sum"), ts=("ts", "sum"), laser=("laser", "sum"),
-                    bill=("bill", "sum"), ctn=("ctn", "sum")))
+                    bill=("bill", "sum"), ctn=("ctn", "sum"),
+                    set=("set", "max")))              # ek AC ka Set ek hi (parts mein dohraya na jaye)
     groups["_n"] = pd.to_numeric(groups["k_ac"], errors="coerce")
     groups = groups.sort_values(["k_dist", "_n", "k_ac"])
 
@@ -1922,21 +1924,42 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
             ("Both Side", f"{int(both):,}"), ("Single Side", f"{int(single):,}"),
             ("Total Used Paper Sheet (Both + Single)", f"{int(both) + int(single):,}")]
         if has_bill and x is not None:       # Set / Billing wale field bhare hon to
-            items += [("Total Double", f"{int(x.td.sum()):,}"), ("Total Single", f"{int(x.ts.sum()):,}"),
+            items += [("Set", f"{int(x.set.sum()):,}"),
+                      ("Total Double", f"{int(x.td.sum()):,}"), ("Total Single", f"{int(x.ts.sum()):,}"),
                       ("Laser", f"{int(x.laser.sum()):,}"), ("Billing Page", f"{int(x.bill.sum()):,}"),
                       ("Carton", f"{x.ctn.sum():,.3f}".rstrip("0").rstrip("."))]
         return _card_row([(n, v, style) for n, v in items], small=True)
 
     st.markdown("**Grand Total**")
     html = []
-    for kd, part in groups.groupby("k_dist", sort=True):     # sirf District ka jod
-        html.append(dcards(part["dist"].iloc[0] or "–", len(part),
-                           part.parts.sum(), part.pages.sum(), part.both.sum(), part.single.sum(), x=part))
+    def ac_table(part):
+        """Us District ke har AC ki detail (chhoti table)."""
+        t = pd.DataFrame({
+            "Ac No": part["acno"], "Ac Name": part["acname"], "Total Parts": part["parts"].astype(int),
+            "Total Side Print": part["pages"].astype(int), "Both Side": part["both"].astype(int),
+            "Single Side": part["single"].astype(int),
+            "Total Used Paper Sheet": (part["both"] + part["single"]).astype(int)})
+        if has_bill:
+            t["Set"] = part["set"].round().astype(int)
+            t["Total Double"] = part["td"].round().astype(int)
+            t["Total Single"] = part["ts"].round().astype(int)
+            t["Laser"] = part["laser"].round().astype(int)
+            t["Billing Page"] = part["bill"].round().astype(int)
+            t["Carton"] = part["ctn"].round(3)
+        st.dataframe(t, use_container_width=True, hide_index=True)
+
+    for kd, part in groups.groupby("k_dist", sort=True):     # District ka jod + andar AC detail
+        dname = part["dist"].iloc[0] or "–"
+        st.markdown(dcards(dname, len(part), part.parts.sum(), part.pages.sum(), part.both.sum(),
+                           part.single.sum(), x=part), unsafe_allow_html=True)
+        with st.expander(f"📋 {dname} – AC wise detail ({len(part)} AC)"):
+            ac_table(part)
     if groups["k_dist"].nunique() > 1:       # sabka jod (hara)
-        html.append(dcards(f"GRAND TOTAL ({groups['k_dist'].nunique()} District)", len(groups),
+        st.markdown(dcards(f"GRAND TOTAL ({groups['k_dist'].nunique()} District)", len(groups),
                            groups.parts.sum(), groups.pages.sum(), groups.both.sum(), groups.single.sum(), "grand",
-                           x=groups))
-    st.markdown("".join(html), unsafe_allow_html=True)
+                           x=groups), unsafe_allow_html=True)
+        with st.expander(f"📋 Sabhi AC ki detail ({len(groups)} AC)"):
+            ac_table(groups.assign(acname=groups["dist"] + " – " + groups["acname"]))
 
 
 def counter_summary(db, table: str, sc: dict, rows=None):
