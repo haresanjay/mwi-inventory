@@ -1296,10 +1296,10 @@ def log_view(db):
     df["_d"] = t.dt.date
     c1, c2, c3, c4 = st.columns(4)
     users = c1.multiselect("User", sorted(df["User_Name"].dropna().unique()), key="log_u")
-    acts = c2.multiselect("Kya kiya", sorted(df["Action"].dropna().unique()), key="log_a")
+    acts = c2.multiselect("Whats Find", sorted(df["Action"].dropna().unique()), key="log_a")
     tabs_ = c3.multiselect("Table", sorted(df["Table_Name"].dropna().unique()), key="log_t")
-    day = c4.date_input("Tarikh", value=None, format="DD/MM/YYYY", key="log_d")
-    q = st.text_input("Details mein khojein", key="log_q")
+    day = c4.date_input("Date", value=None, format="DD/MM/YYYY", key="log_d")
+    q = st.text_input("Details Find", key="log_q")
     if users:
         df = df[df["User_Name"].isin(users)]
     if acts:
@@ -1311,7 +1311,7 @@ def log_view(db):
     if q and q.strip():
         df = df[df["Details"].fillna("").str.contains(q.strip(), case=False, regex=False)]
     show = df[["Samay", "User_Name", "Action", "Table_Name", "Entry_ID", "Details"]].rename(columns={
-        "User_Name": "User", "Action": "Kya kiya", "Table_Name": "Table", "Entry_ID": "Entry id"})
+        "User_Name": "User", "Action": "Whats Find", "Table_Name": "Table", "Entry_ID": "Entry id"})
     st.caption(f"Log entries: {len(show):,}")
     st.dataframe(show, use_container_width=True, hide_index=True)
     st.download_button("⬇️ Log Excel (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
