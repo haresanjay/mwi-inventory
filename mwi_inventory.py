@@ -146,6 +146,8 @@ FIELD_ORDER = {
     },
     "PDF_DETAIL": {
         "first": [
+            F("Roll Type", ["roll_type", "roll", "roll_name", "list_type"], "Roll_Type", "text"),
+            F("Publish Date", ["publish_date", "published_date", "roll_date", "pub_date"], "Publish_Date", "date"),
             F("District Name", ["district_name", "district", "dist_name", "dist", "zila"],
               "District_Name", "text"),
             F("Ac Name", ["ac_name", "acname", "assembly_name", "ac_naam", "vidhan_sabha"],
@@ -1280,7 +1282,7 @@ def save_entry(db, table, fields, labels, pics, values, uploads, edit=None):
 FILTER_LABELS = {
     "Machine_Counter": ["Machine No", "Model"],
     "Machine_Parts": ["Machine No", "Model Number", "Parts Name"],
-    "PDF_DETAIL": ["District Name", "Ac Name", "Ac No"],
+    "PDF_DETAIL": ["Roll Type", "Publish Date", "District Name", "Ac Name", "Ac No"],
     "Paper_Table": ["Party Name", "Paper Company", "GSM"],
     "Toner": ["Toner Company", "Party Name"],
     "Attendance": ["Name", "Status", "Department"],
@@ -1601,7 +1603,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
         "PDF_DETAIL": {"dist": "District Name", "acno": "Ac No", "acname": "Ac Name",
                        "page": "Total Pages", "parts": "Total Parts", "both": "Both Side",
                        "single": "Single Side", "td": "Total Double", "ts": "Total Single",
-                       "laser": "Laser", "bill": "Billing Page", "ctn": "Carton", "set": "Set"},
+                       "laser": "Laser", "bill": "Billing Page", "ctn": "Carton", "set": "Set",
+                       "roll": "Roll Type", "pdate": "Publish Date"},
     }.get(table)
     if not want:
         return {}
@@ -1901,13 +1904,19 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
         "both": given("both", page // 2), "single": given("single", page % 2),
         "td": _num(df, sc.get("td")), "ts": _num(df, sc.get("ts")), "laser": _num(df, sc.get("laser")),
         "bill": _num(df, sc.get("bill")), "ctn": _num(df, sc.get("ctn")), "set": _num(df, sc.get("set")),
+        "roll": clean(sc.get("roll")),
+        "pdate": pd.to_datetime(df[sc["pdate"]], errors="coerce") if sc.get("pdate") in df.columns
+        else pd.Series(pd.NaT, index=df.index),
     })
+    g["roll"] = g["roll"].replace("", "–")
+    # Roll + Publish Date dono se alag: ek hi Roll ki do tarikh kabhi mix nahi hongi
+    g["k_roll"] = g["roll"].str.upper() + "|" + g["pdate"].dt.strftime("%Y-%m-%d").fillna("")
     # table mein Set / Billing wale column hon to Grand Total mein dikhao
     has_bill = any(sc.get(k) in df.columns for k in ("set", "td", "ts", "laser", "bill", "ctn"))
     g["k_dist"] = g["dist"].str.upper()
     g["k_ac"] = g["acno"].str.upper().str.replace(r"\.0+$", "", regex=True).str.lstrip("0")
-    groups = (g.groupby(["k_dist", "k_ac"], as_index=False, sort=False)
-               .agg(dist=("dist", "first"), acno=("acno", "first"),
+    groups = (g.groupby(["k_roll", "k_dist", "k_ac"], as_index=False, sort=False)
+               .agg(roll=("roll", "first"), pdate=("pdate", "max"), dist=("dist", "first"), acno=("acno", "first"),
                     acname=("acname", lambda s: next((x for x in s if x), "")),
                     parts=("parts", "sum"), pages=("page", "sum"),
                     both=("both", "sum"), single=("single", "sum"),
@@ -1948,18 +1957,29 @@ def pdf_summary(db, table: str, sc: dict, rows=None):
             t["Carton"] = part["ctn"].round(3)
         st.dataframe(t, use_container_width=True, hide_index=True)
 
-    for kd, part in groups.groupby("k_dist", sort=True):     # District ka jod + andar AC detail
-        dname = part["dist"].iloc[0] or "–"
-        st.markdown(dcards(dname, len(part), part.parts.sum(), part.pages.sum(), part.both.sum(),
-                           part.single.sum(), x=part), unsafe_allow_html=True)
-        with st.expander(f"📋 {dname} – AC wise detail ({len(part)} AC)"):
-            ac_table(part)
-    if groups["k_dist"].nunique() > 1:       # sabka jod (hara)
-        st.markdown(dcards(f"GRAND TOTAL ({groups['k_dist'].nunique()} District)", len(groups),
-                           groups.parts.sum(), groups.pages.sum(), groups.both.sum(), groups.single.sum(), "grand",
-                           x=groups), unsafe_allow_html=True)
-        with st.expander(f"📋 Sabhi AC ki detail ({len(groups)} AC)"):
-            ac_table(groups.assign(acname=groups["dist"] + " – " + groups["acname"]))
+    def one_roll(gr, key):
+        for kd, part in gr.groupby("k_dist", sort=True):     # District ka jod + andar AC detail
+            dname = part["dist"].iloc[0] or "–"
+            st.markdown(dcards(dname, len(part), part.parts.sum(), part.pages.sum(), part.both.sum(),
+                               part.single.sum(), x=part), unsafe_allow_html=True)
+            with st.expander(f"📋 {dname} – AC wise detail ({len(part)} AC)  {key}"):
+                ac_table(part)
+        if gr["k_dist"].nunique() > 1:       # sabka jod (hara)
+            st.markdown(dcards(f"GRAND TOTAL ({gr['k_dist'].nunique()} District)", len(gr),
+                               gr.parts.sum(), gr.pages.sum(), gr.both.sum(), gr.single.sum(), "grand",
+                               x=gr), unsafe_allow_html=True)
+            with st.expander(f"📋 Sabhi AC ki detail ({len(gr)} AC)  {key}"):
+                ac_table(gr.assign(acname=gr["dist"] + " – " + gr["acname"]))
+
+    # Har Roll (Draft / Final ...) ka alag Grand Total – nayi tarikh wala upar
+    order = (groups.groupby("k_roll")["pdate"].max().sort_values(ascending=False, na_position="last").index)
+    for kr in order:
+        gr = groups[groups["k_roll"] == kr]
+        d = gr["pdate"].max()
+        title = gr["roll"].iloc[0] + (f"  –  Published {d:%d-%m-%Y}" if not pd.isna(d) else "")
+        if len(order) > 1 or kr != "–":
+            st.markdown(f"##### 📄 {title}")
+        one_roll(gr, f"· {gr['roll'].iloc[0]}")
 
 
 def counter_summary(db, table: str, sc: dict, rows=None):
@@ -2420,7 +2440,11 @@ def _key(v):
 UPLOAD_KEYS = {
     "Paper_Table": ["Invoice No", "Paper Company", "Qty Rim"],
     "Toner": ["Invoice No", "Toner Qty"],
-    "PDF_DETAIL": [["Ac No", "Part No"], ["District Name", "Ac No"]],   # Part No na ho to District + Ac
+    "PDF_DETAIL": [["Roll Type", "Publish Date", "Ac No", "Part No"],
+                   ["Roll Type", "Publish Date", "District Name", "Ac No"],
+                   ["Publish Date", "Ac No", "Part No"], ["Publish Date", "District Name", "Ac No"],
+                   ["Roll Type", "Ac No", "Part No"], ["Roll Type", "District Name", "Ac No"],
+                   ["Ac No", "Part No"], ["District Name", "Ac No"]],   # har Roll + tarikh alag
     "Machine_Parts": ["Sr No", "Parts Name", "Model Number"],
     "Machine_Counter": ["Machine No", "Reading Start Date"],
     "Attendance": ["Employee ID", "Date"],
