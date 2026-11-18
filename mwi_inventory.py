@@ -84,6 +84,13 @@ PHOTOS = {
              "button": "🖨️ Toner Image", "title": "Toner Photo"},
         ],
     },
+    "PDF_DETAIL": {
+        "heading": "PDF Detail Photo", "item": "Entry",
+        "fields": [
+            {"col": "pdf_photo_path", "label": "PDF Detail Photo", "alts": ["pdf_photo", "page_detail_photo"],
+             "folder": "pdf_photos", "button": "📑 PDF Image", "title": "PDF Detail Photo"},
+        ],
+    },
     "Paper_Toner_Stock": {
         "heading": "Stock Photo", "item": "Entry",
         "fields": [
@@ -1428,7 +1435,7 @@ def stock_view_pick(table: str, cols: list[dict], rows: list[dict]) -> list[dict
     tcol = next((c for c, l in labels.items() if l == "Item Type"), None)
     if not tcol:
         return rows
-    view = st.radio("Dikhayein", ["📦 Sab (Paper + Toner)", "📄 Paper Stock", "🖨️ Toner Stock"],
+    view = st.radio("Dikhayein", ["📦 (Paper + Toner)", "📄 Paper Stock", "🖨️ Toner Stock"],
                     horizontal=True, key=f"{table}_view", label_visibility="collapsed")
     st.session_state[f"{table}_view_now"] = view
     if view.startswith("📄"):
