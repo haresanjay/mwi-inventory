@@ -1775,7 +1775,7 @@ def attendance_day(df, sc: dict, d):
     if st.session_state.get(k) is None:
         st.session_state[k] = days[-1]               # shuru mein sabse aakhri din
     c1, c2, c3 = st.columns([3, 1, 1])
-    day = c1.date_input("Din chunein", min_value=days[0], max_value=days[-1], format="DD/MM/YYYY", key=k)
+    day = c1.date_input("Select Day", min_value=days[0], max_value=days[-1], format="DD/MM/YYYY", key=k)
     if day is None:
         return
 
