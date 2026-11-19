@@ -1804,6 +1804,7 @@ def attendance_day(df, sc: dict, d):
     show = show.iloc[pd.to_numeric(show["Employee ID"], errors="coerce").fillna(10**9).argsort(kind="stable")]
     st.caption(f"{day:%d-%m-%Y} ({day:%A})")
     show = show.drop(columns=["Status", "Work Hours"])
+    show.insert(0, "Date", f"{day:%d-%m-%Y}")
     st.dataframe(show, use_container_width=True, hide_index=True)
 
 
