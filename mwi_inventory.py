@@ -1784,8 +1784,8 @@ def attendance_day(df, sc: dict, d):
         lst = [x for x in days if (x < cur if step < 0 else x > cur)]
         if lst:
             st.session_state[k] = lst[-1] if step < 0 else lst[0]
-    c2.button("◀ Pichhla din", key=k + "_prev", on_click=_go, args=(-1,), use_container_width=True)
-    c3.button("Agla din ▶", key=k + "_next", on_click=_go, args=(1,), use_container_width=True)
+    c2.button("◀ Prev Day", key=k + "_prev", on_click=_go, args=(-1,), use_container_width=True)
+    c3.button("Next Day ▶", key=k + "_next", on_click=_go, args=(1,), use_container_width=True)
 
     col = lambda key: df[sc[key]] if sc.get(key) in df.columns else pd.Series(None, index=df.index)
     emp, name, status = col("emp"), col("name"), col("status").fillna("")
@@ -1815,9 +1815,11 @@ def attendance_day(df, sc: dict, d):
     ], small=True), unsafe_allow_html=True)
     color = {"Present": "background-color:#C6E0B4", "Out Missing": "background-color:#FFE066",
              "Absent": "background-color:#F8CBAD"}
-    sty = show.style
-    sty = (sty.map if hasattr(sty, "map") else sty.applymap)(lambda v: color.get(v, ""), subset=["Status"])
-    st.dataframe(sty.format({"Work Hours": "{:.2f}"}, na_rep=""), use_container_width=True, hide_index=True)
+    stat = show["Status"].tolist()                   # Status column nahi dikhega, sirf Name ka rang
+    show = show.drop(columns=["Status", "Work Hours"])
+    sty = show.style.apply(lambda _: [color.get(x, "") for x in stat], subset=["Name"], axis=0)
+    st.dataframe(sty, use_container_width=True, hide_index=True)
+    st.caption("🟩 Present  ·  🟨 Out Missing  ·  🟥 Absent")
 
 
 def scanning_summary(db, table: str, sc: dict, rows=None):
