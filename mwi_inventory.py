@@ -1802,24 +1802,9 @@ def attendance_day(df, sc: dict, d):
     absent = absent.assign(**{"In Time": "", "Out Time": "", "Work Hours": None, "Status": "Absent"})
     show = pd.concat([rows, absent], ignore_index=True)
     show = show.iloc[pd.to_numeric(show["Employee ID"], errors="coerce").fillna(10**9).argsort(kind="stable")]
-    pres = int(rows["Status"].eq("Present").sum())
-    miss = int(rows["Status"].eq("Out Missing").sum())
     st.caption(f"{day:%d-%m-%Y} ({day:%A})")
-    st.markdown(_card_row([
-        ("Kul Karmchari", f"{len(show):,}"),
-        ("Aaye (In)", f"{len(rows):,}", "grand"),
-        ("Present (In+Out)", f"{pres:,}"),
-        ("Out Missing", f"{miss:,}", bool(miss)),
-        ("Absent", f"{len(absent):,}", "dist" if len(absent) else False),
-        ("Total Hours", f"{rows['Work Hours'].sum():.2f}"),
-    ], small=True), unsafe_allow_html=True)
-    color = {"Present": "background-color:#C6E0B4", "Out Missing": "background-color:#FFE066",
-             "Absent": "background-color:#F8CBAD"}
-    stat = show["Status"].tolist()                   # Status column nahi dikhega, sirf Name ka rang
     show = show.drop(columns=["Status", "Work Hours"])
-    sty = show.style.apply(lambda _: [color.get(x, "") for x in stat], subset=["Name"], axis=0)
-    st.dataframe(sty, use_container_width=True, hide_index=True)
-    st.caption("🟩 Present  ·  🟨 Out Missing  ·  🟥 Absent")
+    st.dataframe(show, use_container_width=True, hide_index=True)
 
 
 def scanning_summary(db, table: str, sc: dict, rows=None):
