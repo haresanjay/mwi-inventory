@@ -1768,7 +1768,6 @@ def attendance_day(df, sc: dict, d):
     days = sorted({x.date() for x in d.dropna()})
     if not days:
         return
-    st.markdown("**📅 Day-wise Attendance**")
     k = "Attendance_dayview"
     if st.session_state.get(k) is not None and not (days[0] <= st.session_state[k] <= days[-1]):
         st.session_state.pop(k)
