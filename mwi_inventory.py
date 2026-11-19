@@ -1758,8 +1758,66 @@ def attendance_summary(db, table: str, sc: dict, rows=None):
     t["_m"] = pd.to_datetime(t["Month"], format="%m-%Y")
     t = (t.sort_values(["_m", "Employee ID"], ascending=[False, True])
           [["Month", "Name", "Days In", "Present (In+Out)", "Out Missing", "Total Hours"]])
+    attendance_day(df, sc, d)
     st.markdown("**Grand Total**")
     st.dataframe(t, use_container_width=True, hide_index=True)
+
+
+def attendance_day(df, sc: dict, d):
+    """Kisi ek din ki attendance: kaun aaya (In / Out / Ghante), kiska Out missing, kaun nahi aaya."""
+    days = sorted({x.date() for x in d.dropna()})
+    if not days:
+        return
+    st.markdown("**📅 Day-wise Attendance**")
+    k = "Attendance_dayview"
+    if st.session_state.get(k) is not None and not (days[0] <= st.session_state[k] <= days[-1]):
+        st.session_state.pop(k)
+    if st.session_state.get(k) is None:
+        st.session_state[k] = days[-1]               # shuru mein sabse aakhri din
+    c1, c2, c3 = st.columns([3, 1, 1])
+    day = c1.date_input("Din chunein", min_value=days[0], max_value=days[-1], format="DD/MM/YYYY", key=k)
+    if day is None:
+        return
+
+    def _go(step):
+        cur = st.session_state.get(k) or days[-1]
+        lst = [x for x in days if (x < cur if step < 0 else x > cur)]
+        if lst:
+            st.session_state[k] = lst[-1] if step < 0 else lst[0]
+    c2.button("◀ Pichhla din", key=k + "_prev", on_click=_go, args=(-1,), use_container_width=True)
+    c3.button("Agla din ▶", key=k + "_next", on_click=_go, args=(1,), use_container_width=True)
+
+    col = lambda key: df[sc[key]] if sc.get(key) in df.columns else pd.Series(None, index=df.index)
+    emp, name, status = col("emp"), col("name"), col("status").fillna("")
+    hhmm = lambda s: s.fillna("").astype(str).str.slice(0, 5)
+    today = d.dt.date.eq(day)
+    rows = pd.DataFrame({"Employee ID": emp, "Name": name, "In Time": hhmm(col("tin")),
+                         "Out Time": hhmm(col("tout")), "Work Hours": _num(df, sc.get("hours")).round(2),
+                         "Status": status})[today]
+    # Us mahine mein jo bhi karmchari kabhi aaya, par is din nahi aaya -> Absent
+    month = d.dt.to_period("M").eq(pd.Period(day, "M"))
+    who = pd.DataFrame({"Employee ID": emp, "Name": name})[month].drop_duplicates()
+    seen = set(zip(rows["Employee ID"].astype(str), rows["Name"].astype(str)))
+    absent = who[[(str(a), str(b)) not in seen for a, b in zip(who["Employee ID"], who["Name"])]]
+    absent = absent.assign(**{"In Time": "", "Out Time": "", "Work Hours": None, "Status": "Absent"})
+    show = pd.concat([rows, absent], ignore_index=True)
+    show = show.iloc[pd.to_numeric(show["Employee ID"], errors="coerce").fillna(10**9).argsort(kind="stable")]
+    pres = int(rows["Status"].eq("Present").sum())
+    miss = int(rows["Status"].eq("Out Missing").sum())
+    st.caption(f"{day:%d-%m-%Y} ({day:%A})")
+    st.markdown(_card_row([
+        ("Kul Karmchari", f"{len(show):,}"),
+        ("Aaye (In)", f"{len(rows):,}", "grand"),
+        ("Present (In+Out)", f"{pres:,}"),
+        ("Out Missing", f"{miss:,}", bool(miss)),
+        ("Absent", f"{len(absent):,}", "dist" if len(absent) else False),
+        ("Total Hours", f"{rows['Work Hours'].sum():.2f}"),
+    ], small=True), unsafe_allow_html=True)
+    color = {"Present": "background-color:#C6E0B4", "Out Missing": "background-color:#FFE066",
+             "Absent": "background-color:#F8CBAD"}
+    sty = show.style
+    sty = (sty.map if hasattr(sty, "map") else sty.applymap)(lambda v: color.get(v, ""), subset=["Status"])
+    st.dataframe(sty.format({"Work Hours": "{:.2f}"}, na_rep=""), use_container_width=True, hide_index=True)
 
 
 def scanning_summary(db, table: str, sc: dict, rows=None):
