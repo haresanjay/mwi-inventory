@@ -1805,6 +1805,8 @@ def attendance_day(df, sc: dict, d):
     show = show.drop(columns=["Status", "Work Hours"])
     show.insert(0, "Date", f"{day:%d-%m-%Y}")
     st.dataframe(show, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Download CSV", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"Attendance_{day:%d-%m-%Y}.csv", mime="text/csv", key=k + "_csv")
 
 
 def scanning_summary(db, table: str, sc: dict, rows=None):
