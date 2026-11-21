@@ -1971,6 +1971,101 @@ def used_plan(rows: list[dict], dcol, qcol, ucol, bcol, id_col, used_date, need:
     return plan, left, sum(bal(r) for r in pool)
 
 
+def _ind(n) -> str:
+    return _money(n).replace("₹ ", "")
+
+
+def _nice(paper: bool, n: int) -> str:
+    return f"{_ind(n)} Sheet ({_ind(round(n / 5000, 2))} Carton)" if paper else f"{_ind(n)} Pkt"
+
+
+def _used_inputs(k: str, paper: bool, d0, unit0=None, qty0=None, rem0=""):
+    """Used Date / Unit / Qty / Remark ke box. Lautata hai (date, unit, qty, remark, factor)."""
+    c1, c2, c3 = st.columns([2, 1, 1])
+    used_date = c1.date_input("Used Date", value=d0, format="DD/MM/YYYY", key=f"{k}_d")
+    if paper:
+        units = list(PAPER_UNITS)
+        unit = c2.selectbox("Unit", units, index=units.index(unit0) if unit0 in units else 0, key=f"{k}_u")
+        qty = c3.number_input("Qty", min_value=0.0, value=None if qty0 is None else float(qty0), step=1.0, key=f"{k}_q")
+        factor = PAPER_UNITS[unit]
+    else:
+        unit, factor = "Pkt", 1
+        c2.text_input("Unit", "Pkt", disabled=True, key=f"{k}_u")
+        qty = c3.number_input("Qty", min_value=0, value=None if qty0 is None else int(round(float(qty0))),
+                              step=1, key=f"{k}_q")
+    remark = st.text_input("Remark (optional)", value=rem0 or "", key=f"{k}_r")
+    if paper:
+        st.caption("1 Carton = 10 Ream = 5,000 Sheet  ·  1 Ream = 500 Sheet")
+    return used_date, unit, qty, remark, factor
+
+
+def _detail(rec: dict) -> list[dict]:
+    try:
+        return json.loads(rec.get("Detail") or "[]")
+    except ValueError:
+        return []
+
+
+def _virtual_back(rows: list[dict], rec: dict, ucol, bcol, id_col) -> list[dict]:
+    """Purani Used Entry ko (sirf hisaab mein) wapas karke rows ki copy."""
+    rows = [dict(r) for r in rows]
+    by_id = {r.get(id_col): r for r in rows}
+    for d in _detail(rec):
+        r = by_id.get(d["id"])
+        if r is None:
+            continue
+        used = int(round(_num0(r.get(ucol)) or 0))
+        back = min(int(d["q"]), used)
+        r[ucol] = used - back
+        if bcol:
+            r[bcol] = int(round(_num0(r.get(bcol)) or 0)) + back
+    return rows
+
+
+def _plan_view(conf, by, plan):
+    st.dataframe(pd.DataFrame([{
+        "Received Date": p["date"].strftime("%d-%m-%Y") if p["date"] != date.min else "",
+        **{c: p["row"].get(by.get(c)) for c in conf["show"]},
+        "Balance (abhi)": p["bal"], "Ghatega": p["take"], "Balance (naya)": p["bal"] - p["take"],
+    } for p in plan]), use_container_width=True, hide_index=True)
+
+
+def _apply_back(db, table, rec, ucol, bcol, id_col, mod) -> int:
+    """Used Entry ka kharch asli entries mein wapas jodna."""
+    n = 0
+    for d in _detail(rec):
+        got = db.select(table, {"select": "*", id_col: f"eq.{d['id']}"})
+        if not got:
+            continue
+        r = got[0]
+        used = int(round(_num0(r.get(ucol)) or 0))
+        back = min(int(d["q"]), used)
+        row = {ucol: used - back}
+        if bcol:
+            row[bcol] = int(round(_num0(r.get(bcol)) or 0)) + back
+        if mod:
+            row[mod["column_name"]] = modify_value(mod)
+        if db.update(table, id_col, d["id"], row, log_action="Used Entry Wapas"):
+            n += 1
+    return n
+
+
+def _apply_plan(db, table, plan, used_date, ucol, bcol, id_col, mod) -> int:
+    done = 0
+    for p in plan:
+        row = {ucol: p["used"] + p["take"]}
+        if bcol:
+            row[bcol] = p["bal"] - p["take"]
+        if mod:
+            row[mod["column_name"]] = modify_value(mod)
+        try:
+            if db.update(table, id_col, p["row"][id_col], row, log_action=f"Used Entry ({used_date:%d-%m-%Y})"):
+                done += 1
+        except Exception:
+            pass
+    return done
+
+
 def used_entry(db, table: str):
     """➖ Paper / Toner ka kharch: Date + Qty daalo, Balance apne aap ghat jaye."""
     paper = table == "Paper_Table"
@@ -1987,77 +2082,70 @@ def used_entry(db, table: str):
         st.error(f"{TABLES[table]} mein {conf['qty']} / {conf['used']} column nahi mile.")
         return
     ver = st.session_state.setdefault(k + "_ver", 0)
-    c1, c2, c3 = st.columns([2, 1, 1])
-    used_date = c1.date_input("Used Date", value=datetime.now(IST).date(), format="DD/MM/YYYY", key=f"{k}_d{ver}")
-    if paper:
-        unit = c2.selectbox("Unit", list(PAPER_UNITS), key=f"{k}_u{ver}")
-        qty = c3.number_input("Qty", min_value=0.0, value=None, step=1.0, key=f"{k}_q{ver}")
-        factor = PAPER_UNITS[unit]
-    else:
-        unit, factor = "Pkt", 1
-        c2.text_input("Unit", "Pkt", disabled=True, key=f"{k}_u{ver}")
-        qty = c3.number_input("Qty", min_value=0, value=None, step=1, key=f"{k}_q{ver}")
-    remark = st.text_input("Remark (optional)", key=f"{k}_r{ver}")
-    if paper:
-        st.caption("1 Carton = 10 Ream = 5,000 Sheet  ·  1 Ream = 500 Sheet")
-
     try:
         rows = db.select_all(table, {"select": "*"})
     except Exception as e:
         st.error(f"Entries nahi aa sakin: {e}")
         return
+
+    # ✏️ Edit chal raha ho to upar Edit form, warna nayi Used Entry
+    ed = st.session_state.get(k + "_edit")
+    if ed:
+        st.markdown(f"**✏️ Used Entry Edit:** {pd.to_datetime(ed['Used_Date']):%d-%m-%Y} – "
+                    f"{float(ed['Qty']):g} {ed.get('Unit') or ''}")
+        base_rows = _virtual_back(rows, ed, ucol, bcol, id_col)
+        ekey = f"{k}_e{ed['id']}"
+        used_date, unit, qty, remark, factor = _used_inputs(
+            ekey, paper, pd.to_datetime(ed["Used_Date"]).date(), ed.get("Unit"), ed.get("Qty"), ed.get("Remark"))
+    else:
+        base_rows = rows
+        used_date, unit, qty, remark, factor = _used_inputs(f"{k}{ver}", paper, datetime.now(IST).date())
+
     need = int(round((qty or 0) * factor))
-    plan, left, avail = used_plan(rows, dcol, qcol, ucol, bcol, id_col, used_date, need)
-    base = conf["unit"]
-    ind = lambda n: _money(n).replace("₹ ", "")
-    nice = (lambda n: f"{ind(n)} Sheet ({ind(round(n / 5000, 2))} Carton)") if paper else (lambda n: f"{ind(n)} Pkt")
-    st.caption(f"{used_date:%d-%m-%Y} tak kul bacha Balance: **{nice(avail)}**")
+    plan, left, avail = used_plan(base_rows, dcol, qcol, ucol, bcol, id_col, used_date, need)
+    st.caption(f"{used_date:%d-%m-%Y} tak kul bacha Balance: **{_nice(paper, avail)}**")
+    qtxt = f"{(qty or 0):g} {unit}" + (f" ({_ind(need)} {conf['unit']})" if factor != 1 else "")
 
-    if need > 0:
-        if left > 0:
-            st.error(f"❌ Balance kam hai: chahiye {nice(need)}, bacha sirf {nice(avail)}. "
-                     "Pehle naye maal (invoice) ki entry daalein ya Qty theek karein.")
-        else:
-            st.dataframe(pd.DataFrame([{
-                "Received Date": p["date"].strftime("%d-%m-%Y") if p["date"] != date.min else "",
-                **{c: p["row"].get(by.get(c)) for c in conf["show"]},
-                f"Balance (abhi)": p["bal"], "Ghatega": p["take"], "Balance (naya)": p["bal"] - p["take"],
-            } for p in plan]), use_container_width=True, hide_index=True)
-            qtxt = f"{qty:g} {unit}" + (f" ({ind(need)} {base})" if factor != 1 else "")
-            st.button(f"✅ Save: {used_date:%d-%m-%Y} ko {qtxt} used", type="primary", key=f"{k}_btn",
-                      on_click=lambda: st.session_state.__setitem__(k + "_go", True))
-            if st.session_state.pop(k + "_go", False):
-                detail = [{"id": p["row"][id_col], "q": p["take"]} for p in plan]
-                try:
-                    db.insert(USED_TABLE, {"Used_Date": used_date.isoformat(), "Item_Type": "Paper" if paper else "Toner",
-                                           "Qty": float(qty), "Unit": unit, "Qty_Base": need,
-                                           "Remark": remark.strip() or None, "Detail": json.dumps(detail)})
-                except Exception as e:
-                    st.error(f"❌ Save nahi hua: {e}  — Supabase mein **paper_toner_used_setup.sql** chalayein.")
-                    return
-                done = 0
-                for p in plan:
-                    row = {ucol: p["used"] + p["take"]}
-                    if bcol:
-                        row[bcol] = p["bal"] - p["take"]
-                    if mod:
-                        row[mod["column_name"]] = modify_value(mod)
-                    try:
-                        if db.update(table, id_col, p["row"][id_col], row, log_action=f"Used Entry ({used_date:%d-%m-%Y})"):
-                            done += 1
-                    except Exception:
-                        pass
-                st.session_state[k + "_msg"] = (
-                    f"✔ {used_date:%d-%m-%Y} ko {qtxt} used – {done} entry ka Balance ghat gaya."
-                    if done == len(plan) else f"❌ {len(plan) - done} entry update nahi hui – Log dekhein.")
-                st.session_state[k + "_ver"] = ver + 1
-                st.rerun()
+    if ed:
+        c1, c2 = st.columns(2)
+        c2.button("✖ Cancel", key=k + "_ecancel", use_container_width=True,
+                  on_click=lambda: st.session_state.pop(k + "_edit", None))
+    if need > 0 and left > 0:
+        st.error(f"❌ Balance kam hai: chahiye {_nice(paper, need)}, bacha sirf {_nice(paper, avail)}. "
+                 "Pehle naye maal (invoice) ki entry daalein ya Qty theek karein.")
+    elif need > 0:
+        _plan_view(conf, by, plan)
+        label = (f"💾 Update: {used_date:%d-%m-%Y} ko {qtxt}" if ed else f"✅ Save: {used_date:%d-%m-%Y} ko {qtxt} used")
+        (c1 if ed else st).button(label, type="primary", key=k + "_btn", use_container_width=bool(ed),
+                                  on_click=lambda: st.session_state.__setitem__(k + "_go", True))
+        if st.session_state.pop(k + "_go", False):
+            detail = [{"id": p["row"][id_col], "q": p["take"]} for p in plan]
+            try:
+                db.insert(USED_TABLE, {"Used_Date": used_date.isoformat(), "Item_Type": "Paper" if paper else "Toner",
+                                       "Qty": float(qty), "Unit": unit, "Qty_Base": need,
+                                       "Remark": (remark or "").strip() or None, "Detail": json.dumps(detail)})
+            except Exception as e:
+                st.error(f"❌ Save nahi hua: {e}  — Supabase mein **paper_toner_used_setup.sql** chalayein.")
+                return
+            if ed:                                   # purana kharch wapas, phir naya
+                _apply_back(db, table, ed, ucol, bcol, id_col, mod)
+                db.delete(USED_TABLE, "id", ed["id"])
+            done = _apply_plan(db, table, plan, used_date, ucol, bcol, id_col, mod)
+            ok = done == len(plan)
+            st.session_state[k + "_msg"] = (
+                (f"✔ Used Entry update hui – {used_date:%d-%m-%Y} ko {qtxt}." if ed else
+                 f"✔ {used_date:%d-%m-%Y} ko {qtxt} used – {done} entry ka Balance ghat gaya.")
+                if ok else f"❌ {len(plan) - done} entry update nahi hui – Log dekhein.")
+            st.session_state.pop(k + "_edit", None)
+            st.session_state[k + "_ver"] = ver + 1
+            st.rerun()
 
-    used_history(db, table, paper, by, ucol, bcol, id_col, mod)
+    used_history(db, table, paper, ucol, bcol, id_col, mod)
 
 
-def used_history(db, table, paper, by, ucol, bcol, id_col, mod):
-    """📜 Kab kitna paper / toner laga."""
+def used_history(db, table, paper, ucol, bcol, id_col, mod):
+    """📜 Kab kitna paper / toner laga  +  ✏️ Edit / 🗑️ Delete."""
+    k = f"{table}_used"
     try:
         hist = db.select_all(USED_TABLE, {"select": "*", "Item_Type": f"eq.{'Paper' if paper else 'Toner'}",
                                           "order": "Used_Date.desc,id.desc"})
@@ -2073,13 +2161,13 @@ def used_history(db, table, paper, by, ucol, bcol, id_col, mod):
     h["_d"] = pd.to_datetime(h["Used_Date"], errors="coerce")
     h["_m"] = h["_d"].dt.strftime("%m-%Y")
     base = "Sheet" if paper else "Pkt"
-    ind = lambda n: _money(n).replace("₹ ", "")
     st.markdown("**📜 Used History**")
     month = h.groupby("_m", sort=False)["Qty_Base"].sum()
-    cards = [(f"{m}", (f"{ind(int(v))} Sheet · {ind(round(v / 5000, 2))} Ctn" if paper else f"{ind(int(v))} Pkt")) for m, v in month.head(6).items()]
+    cards = [(m, f"{_ind(int(v))} Sheet · {_ind(round(v / 5000, 2))} Ctn" if paper else f"{_ind(int(v))} Pkt")
+             for m, v in month.head(6).items()]
     st.markdown(_card_row(cards, small=True), unsafe_allow_html=True)
     show = pd.DataFrame({"Used Date": h["_d"].dt.strftime("%d-%m-%Y"), "Qty": h["Qty"].map(lambda v: f"{float(v):g}"),
-                         "Unit": h.get("Unit"), f"Total {base}": h["Qty_Base"].map(lambda v: ind(int(v))),
+                         "Unit": h.get("Unit"), f"Total {base}": h["Qty_Base"].map(lambda v: _ind(int(v))),
                          "Remark": h.get("Remark"), "Kisne": h.get("Created_By")})
     st.dataframe(show, use_container_width=True, hide_index=True)
     st.download_button("⬇️ Download CSV", show.to_csv(index=False).encode("utf-8-sig"),
@@ -2087,36 +2175,38 @@ def used_history(db, table, paper, by, ucol, bcol, id_col, mod):
                        key=f"{table}_used_csv")
     if not is_admin():
         return
-    with st.expander("↩️ Galat Used Entry hatayein (Balance wapas)"):
-        opts = {int(r["id"]): f"{pd.to_datetime(r['Used_Date']):%d-%m-%Y} – {float(r['Qty']):g} {r.get('Unit') or ''}"
-                + (f" ({r['Remark']})" if r.get("Remark") else "") for r in hist}
-        pick = st.selectbox("Entry chunein", list(opts), format_func=opts.get, index=None, key=f"{table}_undo_pick")
-        k = f"{table}_undo_go"
-        st.button("↩️ Hatayein", key=f"{table}_undo_btn", disabled=pick is None,
-                  on_click=lambda: st.session_state.__setitem__(k, True))
-        if pick is None or not st.session_state.pop(k, False):
-            return
-        rec = next(r for r in hist if int(r["id"]) == pick)
-        try:
-            detail = json.loads(rec.get("Detail") or "[]")
-        except ValueError:
-            detail = []
-        for d in detail:
-            got = db.select(table, {"select": "*", id_col: f"eq.{d['id']}"})
-            if not got:
-                continue
-            r = got[0]
-            used = int(round(_num0(r.get(ucol)) or 0))
-            back = min(int(d["q"]), used)
-            row = {ucol: used - back}
-            if bcol:
-                row[bcol] = int(round(_num0(r.get(bcol)) or 0)) + back
-            if mod:
-                row[mod["column_name"]] = modify_value(mod)
-            db.update(table, id_col, d["id"], row, log_action="Used Entry Hatayi")
-        db.delete(USED_TABLE, "id", pick)
-        st.session_state[f"{table}_used_msg"] = f"✔ Used Entry hatayi – {opts[pick]} ka Balance wapas aa gaya."
-        st.rerun()
+
+    opts = {int(r["id"]): f"{pd.to_datetime(r['Used_Date']):%d-%m-%Y} – {float(r['Qty']):g} {r.get('Unit') or ''}"
+            + (f" ({r['Remark']})" if r.get("Remark") else "") for r in hist}
+    c1, c2, c3 = st.columns([3, 1, 1])
+    pick = c1.selectbox("Edit / Delete ke liye entry chunein", list(opts), format_func=opts.get, index=None,
+                        placeholder="Used Entry chunein", key=f"{table}_ud_pick")
+    rec = next((r for r in hist if int(r["id"]) == pick), None)
+
+    def _edit():
+        st.session_state[k + "_edit"] = rec
+    c2.button("✏️ Edit", key=f"{table}_ud_edit", disabled=rec is None, on_click=_edit, use_container_width=True)
+    c3.button("🗑️ Delete", key=f"{table}_ud_del", disabled=rec is None, use_container_width=True,
+              on_click=lambda: st.session_state.__setitem__(f"{table}_ud_ask", pick))
+    ask = st.session_state.get(f"{table}_ud_ask")
+    if ask is None or ask not in opts:
+        return
+    st.warning(f"🗑️ **{opts[ask]}** hatani hai? Iska kharch wapas Balance mein jud jayega.")
+    d1, d2 = st.columns(2)
+    d1.button("✅ Haan, Delete karein", type="primary", key=f"{table}_ud_yes", use_container_width=True,
+              on_click=lambda: st.session_state.__setitem__(f"{table}_ud_go", True))
+    d2.button("✖ Nahi", key=f"{table}_ud_no", use_container_width=True,
+              on_click=lambda: st.session_state.pop(f"{table}_ud_ask", None))
+    if not st.session_state.pop(f"{table}_ud_go", False):
+        return
+    drec = next(r for r in hist if int(r["id"]) == ask)
+    _apply_back(db, table, drec, ucol, bcol, id_col, mod)
+    db.delete(USED_TABLE, "id", ask)
+    st.session_state.pop(f"{table}_ud_ask", None)
+    if (st.session_state.get(k + "_edit") or {}).get("id") == ask:
+        st.session_state.pop(k + "_edit", None)
+    st.session_state[k + "_msg"] = f"✔ Used Entry delete hui – {opts[ask]} ka Balance wapas aa gaya."
+    st.rerun()
 
 
 def stock_sync(db, stock_date, paper_sheets: int, toner_pkt: int, which=("Paper_Table", "Toner")):
