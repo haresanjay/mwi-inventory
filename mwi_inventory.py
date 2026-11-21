@@ -1602,7 +1602,7 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     st.download_button("⬇️ Excel (CSV) download", csv.to_csv(index=False).encode("utf-8-sig"),
                        f"{table}.csv", "text/csv", key=f"{table}_csv")
     if sc:
-        {"Machine_Counter": counter_summary, "Paper_Table": paper_summary,
+        {"Machine_Counter": counter_summary, "Paper_Table": paper_summary, "Machine_Parts": parts_summary,
          "PDF_DETAIL": pdf_summary, "Toner": toner_summary,
          "Attendance": attendance_summary, "Paper_Toner_Stock": stock_summary,
          "Scanning": scanning_summary}[table](db, table, sc, rows=rows)
@@ -1654,6 +1654,8 @@ def summary_cols(table: str, cols: list[dict]) -> dict:
         "Machine_Counter": {"din": "Reading Start Date", "dout": "Reading End Date",
                             "tin": "Reading Start No", "tout": "Reading End No",
                             "net": "Total Print Page", "mach": "Machine No"},
+        "Machine_Parts": {"name": "Parts Name", "model": "Model Number", "qty": "Qty", "price": "Price",
+                          "val": "Total Value", "date": "Invoice Date", "sup": "Supplier", "inv": "Invoice No"},
         "Paper_Table": {"nop": "No of Paper", "cons": "Consumption Paper",
                         "bal": "Balance Paper Qty"},
         "Attendance": {"emp": "Employee ID", "name": "Name", "date": "Date", "hours": "Work Hours",
@@ -1990,6 +1992,123 @@ def stock_sync(db, stock_date, paper_sheets: int, toner_pkt: int, which=("Paper_
             st.error(f"❌ {fail} entries update nahi hui – 'edit_permission.sql' chalayein. ({done} hui)")
         else:
             st.success(f"✔ {done} entries update hui – ab Paper / Toner ka Balance stock ke barabar hai.")
+
+
+def _money(v) -> str:
+    """Indian tarika: ₹ 1,21,381  (paise ho to .50)."""
+    neg, v = v < 0, abs(round(float(v), 2))
+    whole, paise = divmod(round(v * 100), 100)
+    w = str(int(whole))
+    if len(w) > 3:
+        head, tail = w[:-3], w[-3:]
+        head = ",".join([head[max(0, i - 2):i] for i in range(len(head), 0, -2)][::-1])
+        w = head + "," + tail
+    return ("-" if neg else "") + "₹ " + w + (f".{int(paise):02d}" if paise else "")
+
+
+def _part_key(name, model) -> str:
+    """Same part pehchanna: chhote akshar, '.', '-', extra space hata kar (D.C.B = DCB)."""
+    t = lambda x: re.sub(r"[\s.\-_/()]+", " ", str(x or "").lower()).strip()
+    return t(name) + " | " + t(model)
+
+
+def parts_summary(db, table: str, sc: dict, rows=None):
+    """Machine Parts: Grand Total + Parts-wise total + same part ke alag-alag price / date."""
+    df = _all_rows(db, table, sc, rows)
+    if df is None or sc.get("name") not in df.columns:
+        return
+    txt = lambda k: (df[sc[k]].fillna("").astype(str).str.strip() if sc.get(k) in df.columns
+                     else pd.Series("", index=df.index))
+    g = pd.DataFrame({"name": txt("name"), "model": txt("model"), "qty": _num(df, sc.get("qty")),
+                      "price": pd.to_numeric(df[sc["price"]], errors="coerce") if sc.get("price") in df.columns
+                      else pd.Series(float("nan"), index=df.index),
+                      "val": _num(df, sc.get("val")), "sup": txt("sup"), "inv": txt("inv"),
+                      "d": pd.to_datetime(df[sc["date"]], errors="coerce") if sc.get("date") in df.columns
+                      else pd.Series(pd.NaT, index=df.index)})
+    g = g[g["name"] != ""]
+    if g.empty:
+        return
+    # Total Value khaali ho to Qty × Price
+    g.loc[g["val"].eq(0) & g["price"].notna(), "val"] = g["qty"] * g["price"].fillna(0)
+    g["key"] = [_part_key(a, b) for a, b in zip(g["name"], g["model"])]
+    g = g.sort_values(["key", "d"], na_position="first")
+    dstr = lambda x: x.strftime("%d-%m-%Y") if pd.notna(x) else "–"
+    num = lambda v: "" if pd.isna(v) else _money(v).replace("₹ ", "")      # Indian: 1,55,550
+
+    t = (g.groupby("key", sort=False)
+          .agg(Name=("name", "first"), Model=("model", "first"), Qty=("qty", "sum"), Value=("val", "sum"),
+               Times=("name", "size"), Prices=("price", lambda x: x.dropna().nunique()),
+               Min=("price", "min"), Max=("price", "max"), First=("d", "min"), Last=("d", "max"),
+               LastPrice=("price", lambda x: x.dropna().iloc[-1] if x.notna().any() else float("nan")))
+          .reset_index(drop=True))
+    multi = t[t["Prices"] > 1]
+
+    st.markdown("**Grand Total**")
+    st.markdown(_card_row([
+        ("Kul Entries", f"{len(g):,}"),
+        ("Alag Parts", f"{len(t):,}"),
+        ("Total Qty", f"{int(round(g['qty'].sum())):,}"),
+        ("Total Value", _money(g["val"].sum()), "grand"),
+        ("Alag Price wale Parts", f"{len(multi):,}", bool(len(multi))),
+    ]), unsafe_allow_html=True)
+
+    with st.expander(f"📋 Parts-wise Total ({len(t)} parts)"):
+        show = pd.DataFrame({
+            "Parts Name": t["Name"], "Model Number": t["Model"],
+            "Qty": t["Qty"].map(num), "Kitni Baar": t["Times"],
+            "Price": [num(a) if p <= 1 else f"{num(a)} – {num(b)}" for a, b, p in zip(t["Min"], t["Max"], t["Prices"])],
+            "Avg Price": [num(round(v / q, 2)) if q else "" for v, q in zip(t["Value"], t["Qty"])],
+            "Last Price": t["LastPrice"].map(num),
+            "Total Value": t["Value"].map(num),
+            "First Date": t["First"].map(dstr), "Last Date": t["Last"].map(dstr)})
+        flag = (t["Prices"] > 1).tolist()
+        sty = show.style.apply(lambda c: ["background-color:#FFE066;color:#000" if f else "" for f in flag],
+                               subset=["Price"], axis=0)
+        st.dataframe(sty, use_container_width=True, hide_index=True)
+        st.caption("Peela Price = same part alag-alag price par aaya (Price mein sabse kam – sabse zyada). "
+                   "Avg Price = Total Value ÷ Qty.")
+        st.download_button("⬇️ Download CSV", show.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="Parts_wise_Total.csv", mime="text/csv", key=f"{table}_pw_csv")
+
+    def history(keys):
+        h = g[g["key"].isin(keys)].copy()
+        out, prev = [], {}
+        for r in h.itertuples():
+            p = prev.get(r.key)
+            ch = ""
+            if p is not None and pd.notna(r.price) and pd.notna(p) and r.price != p:
+                diff = r.price - p
+                ch = f"{'▲' if diff > 0 else '▼'} {num(abs(diff))} ({diff / p * 100:+.0f}%)" if p else ""
+            if pd.notna(r.price):
+                prev[r.key] = r.price
+            out.append({"Parts Name": r.name, "Model Number": r.model, "Invoice Date": dstr(r.d),
+                        "Supplier": r.sup, "Invoice No": r.inv, "Qty": num(r.qty), "Price": num(r.price),
+                        "Price Badla": ch, "Total Value": num(r.val)})
+        return pd.DataFrame(out)
+
+    if len(multi):
+        with st.expander(f"💰 Same part – alag-alag price ({len(multi)} parts)"):
+            mk = set(g.loc[g["key"].isin(set(
+                g.groupby("key")["price"].nunique().loc[lambda x: x > 1].index)), "key"])
+            hist = history(mk)
+            st.dataframe(hist, use_container_width=True, hide_index=True)
+            st.caption("Date ke kram mein. ▲ = pichhli baar se mehnga, ▼ = sasta.")
+            st.download_button("⬇️ Download CSV", hist.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="Parts_Price_Change.csv", mime="text/csv", key=f"{table}_pc_csv")
+
+    with st.expander("🔎 Kisi ek part ki history (date-wise)"):
+        opts = t["Name"] + t["Model"].map(lambda m: f"  ({m})" if m else "")
+        keys = g.drop_duplicates("key")["key"].tolist()
+        pick = st.selectbox("Part chunein", range(len(t)), format_func=lambda i: opts.iloc[i],
+                            index=None, placeholder="Parts Name likhein / chunein", key=f"{table}_hist_pick")
+        if pick is not None:
+            r = t.iloc[pick]
+            st.markdown(_card_row([
+                ("Kitni Baar", f"{int(r.Times)}"), ("Total Qty", num(r.Qty)),
+                ("Price", num(r.Min) if r.Prices <= 1 else f"{num(r.Min)} – {num(r.Max)}", r.Prices > 1),
+                ("Last Price", num(r.LastPrice)), ("Total Value", _money(r.Value), "grand"),
+            ], small=True), unsafe_allow_html=True)
+            st.dataframe(history([keys[pick]]), use_container_width=True, hide_index=True)
 
 
 def toner_summary(db, table: str, sc: dict, rows=None):
