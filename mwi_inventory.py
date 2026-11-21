@@ -2049,26 +2049,8 @@ def parts_summary(db, table: str, sc: dict, rows=None):
         ("Alag Parts", f"{len(t):,}"),
         ("Total Qty", f"{int(round(g['qty'].sum())):,}"),
         ("Total Value", _money(g["val"].sum()), "grand"),
-        ("Alag Price wale Parts", f"{len(multi):,}", bool(len(multi))),
+        ("Different Price Wale Parts", f"{len(multi):,}", bool(len(multi))),
     ]), unsafe_allow_html=True)
-
-    with st.expander(f"📋 Parts-wise Total ({len(t)} parts)"):
-        show = pd.DataFrame({
-            "Parts Name": t["Name"], "Model Number": t["Model"],
-            "Qty": t["Qty"].map(num), "Kitni Baar": t["Times"],
-            "Price": [num(a) if p <= 1 else f"{num(a)} – {num(b)}" for a, b, p in zip(t["Min"], t["Max"], t["Prices"])],
-            "Avg Price": [num(round(v / q, 2)) if q else "" for v, q in zip(t["Value"], t["Qty"])],
-            "Last Price": t["LastPrice"].map(num),
-            "Total Value": t["Value"].map(num),
-            "First Date": t["First"].map(dstr), "Last Date": t["Last"].map(dstr)})
-        flag = (t["Prices"] > 1).tolist()
-        sty = show.style.apply(lambda c: ["background-color:#FFE066;color:#000" if f else "" for f in flag],
-                               subset=["Price"], axis=0)
-        st.dataframe(sty, use_container_width=True, hide_index=True)
-        st.caption("Peela Price = same part alag-alag price par aaya (Price mein sabse kam – sabse zyada). "
-                   "Avg Price = Total Value ÷ Qty.")
-        st.download_button("⬇️ Download CSV", show.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="Parts_wise_Total.csv", mime="text/csv", key=f"{table}_pw_csv")
 
     def history(keys):
         h = g[g["key"].isin(keys)].copy()
@@ -2087,7 +2069,7 @@ def parts_summary(db, table: str, sc: dict, rows=None):
         return pd.DataFrame(out)
 
     if len(multi):
-        with st.expander(f"💰 Same part – alag-alag price ({len(multi)} parts)"):
+        with st.expander(f"💰 Same part – Different Price ({len(multi)} parts)"):
             mk = set(g.loc[g["key"].isin(set(
                 g.groupby("key")["price"].nunique().loc[lambda x: x > 1].index)), "key"])
             hist = history(mk)
@@ -2095,20 +2077,6 @@ def parts_summary(db, table: str, sc: dict, rows=None):
             st.caption("Date ke kram mein. ▲ = pichhli baar se mehnga, ▼ = sasta.")
             st.download_button("⬇️ Download CSV", hist.to_csv(index=False).encode("utf-8-sig"),
                                file_name="Parts_Price_Change.csv", mime="text/csv", key=f"{table}_pc_csv")
-
-    with st.expander("🔎 Kisi ek part ki history (date-wise)"):
-        opts = t["Name"] + t["Model"].map(lambda m: f"  ({m})" if m else "")
-        keys = g.drop_duplicates("key")["key"].tolist()
-        pick = st.selectbox("Part chunein", range(len(t)), format_func=lambda i: opts.iloc[i],
-                            index=None, placeholder="Parts Name likhein / chunein", key=f"{table}_hist_pick")
-        if pick is not None:
-            r = t.iloc[pick]
-            st.markdown(_card_row([
-                ("Kitni Baar", f"{int(r.Times)}"), ("Total Qty", num(r.Qty)),
-                ("Price", num(r.Min) if r.Prices <= 1 else f"{num(r.Min)} – {num(r.Max)}", r.Prices > 1),
-                ("Last Price", num(r.LastPrice)), ("Total Value", _money(r.Value), "grand"),
-            ], small=True), unsafe_allow_html=True)
-            st.dataframe(history([keys[pick]]), use_container_width=True, hide_index=True)
 
 
 def toner_summary(db, table: str, sc: dict, rows=None):
