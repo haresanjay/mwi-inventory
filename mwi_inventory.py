@@ -1525,6 +1525,14 @@ def records_view(db: Supabase, table: str, cols: list[dict]):
     for c in cols:                         # poore ank bina .00 ke
         if c["column_name"] in df.columns and is_whole(c):
             df[c["column_name"]] = pd.to_numeric(df[c["column_name"]], errors="coerce").round().astype("Int64")
+        elif c["column_name"] in df.columns and c["data_type"] in NUM_TYPES:
+            # Rate / Amount jaise: 6000.000 -> 6000,  63.500 -> 63.5  (faltu .000 nahi)
+            s = pd.to_numeric(df[c["column_name"]], errors="coerce")
+            if (s.dropna() % 1 == 0).all():
+                df[c["column_name"]] = s.round().astype("Int64")
+            else:
+                df[c["column_name"]] = s.map(lambda v: "" if pd.isna(v)
+                                             else format(round(float(v), 3), ".3f").rstrip("0").rstrip("."))
     for c in cols:                         # UTC -> India ka samay
         if c["data_type"] == "timestamp with time zone" and c["column_name"] in df.columns:
             t = pd.to_datetime(df[c["column_name"]], utc=True, errors="coerce")
