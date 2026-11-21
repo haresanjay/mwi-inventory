@@ -1884,14 +1884,7 @@ def stock_summary(db, table: str, sc: dict, rows=None):
         t["Stock Date"] = t["Stock Date"].dt.strftime("%d-%m-%Y")
         st.caption("Har ginti ki tarikh ka stock:")
         st.dataframe(t.round(1), use_container_width=True, hide_index=True)
-    if is_admin() and db is not None:
-        if st.session_state.get(f"{table}_filtered"):
-            st.caption("🔄 Balance milane ke liye 🔍 Filter hata dein (adhoore stock se Balance galat ban jayega).")
-        else:
-            view = st.session_state.get(f"{table}_view_now", "")
-            which = ("Paper_Table",) if view.startswith("📄") else ("Toner",) if view.startswith("🖨") \
-                else ("Paper_Table", "Toner")
-            stock_sync(db, last_d.date(), int(round(last["Paper Sheet"])), int(round(last["Toner Pkt"])), which)
+    # 🔄 Stock se Balance milane wala hissa band (stock_sync function zaroorat par wapas laga sakte hain)
 
 
 # List mein peele (yellow) dikhne wale kharch ke field
@@ -2077,12 +2070,11 @@ def parts_summary(db, table: str, sc: dict, rows=None):
         return pd.DataFrame(out)
 
     if len(multi):
-        with st.expander(f"💰 Same part – Different Price ({len(multi)} parts)"):
+        with st.expander(f"💰 Same parts – Different Price ({len(multi)} parts)"):
             mk = set(g.loc[g["key"].isin(set(
                 g.groupby("key")["price"].nunique().loc[lambda x: x > 1].index)), "key"])
             hist = history(mk)
             st.dataframe(hist, use_container_width=True, hide_index=True)
-            st.caption("Date ke kram mein. ▲ = pichhli baar se mehnga, ▼ = sasta.")
             st.download_button("⬇️ Download CSV", hist.to_csv(index=False).encode("utf-8-sig"),
                                file_name="Parts_Price_Change.csv", mime="text/csv", key=f"{table}_pc_csv")
 
@@ -2125,8 +2117,6 @@ def toner_summary(db, table: str, sc: dict, rows=None):
             st.warning("⚠️ Toner Qty × Rate, Amount se nahi mil raha: " + ",  ".join(
                 f"{inv[i]} ({q[i]:g} × {r[i]:g} = {q[i] * r[i]:,.2f}, Amount {0 if pd.isna(a[i]) else a[i]:,.2f})"
                 for i in df.index[bad][:20]))
-        elif has.any():
-            st.caption(f"✔ Sabhi {int(has.sum())} entries mein Toner Qty × Rate = Amount mil raha hai.")
 
 
 def pdf_summary(db, table: str, sc: dict, rows=None):
