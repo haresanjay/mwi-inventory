@@ -1933,6 +1933,192 @@ def sync_plan(db, table: str, stock_date, stock_qty: int):
     return plan, info
 
 
+# ------------------------------------------------------------------ ➖ Used Entry (roz ka kharch)
+USED_TABLE = "Paper_Toner_Used"
+PAPER_UNITS = {"Carton": 5000, "Ream": 500, "Sheet": 1}      # 1 Carton = 10 Ream = 5000 Sheet
+
+
+def _used_cols(db, table: str):
+    conf = SYNC[table]
+    cols = db.columns(table)
+    _, labels, _ = arrange_fields(table, [c for c in cols if not c["is_auto"]])
+    by = {l: c for c, l in labels.items()}
+    dcol, qcol, ucol, bcol = (by.get(conf[k]) for k in ("date", "qty", "used", "bal"))
+    id_col = next((c["column_name"] for c in cols if c["column_name"].lower() == "id"), None)
+    mod = next((c for c in cols if is_modify_col(c["column_name"])), None)
+    return conf, by, dcol, qcol, ucol, bcol, id_col, mod
+
+
+def used_plan(rows: list[dict], dcol, qcol, ucol, bcol, id_col, used_date, need: int):
+    """Sabse purani bachi entry se pehle ghatao (FIFO). Used Date ke baad aayi entry nahi chhooti."""
+    def d(r):
+        t = pd.to_datetime(r.get(dcol), errors="coerce") if dcol else pd.NaT
+        return t.date() if not pd.isna(t) else date.min
+    def bal(r):
+        b = _num0(r.get(bcol)) if bcol else None
+        if b is None:
+            b = (_num0(r.get(qcol)) or 0) - (_num0(r.get(ucol)) or 0)
+        return int(round(b))
+    pool = sorted([r for r in rows if d(r) <= used_date and bal(r) > 0], key=lambda r: (d(r), r.get(id_col) or 0))
+    plan, left = [], need
+    for r in pool:
+        if left <= 0:
+            break
+        take = min(bal(r), left)
+        left -= take
+        plan.append({"row": r, "date": d(r), "bal": bal(r), "take": take,
+                     "used": int(round(_num0(r.get(ucol)) or 0))})
+    return plan, left, sum(bal(r) for r in pool)
+
+
+def used_entry(db, table: str):
+    """➖ Paper / Toner ka kharch: Date + Qty daalo, Balance apne aap ghat jaye."""
+    paper = table == "Paper_Table"
+    k = f"{table}_used"
+    msg = st.session_state.pop(k + "_msg", None)
+    if msg:
+        (st.error if msg.startswith("❌") else st.success)(msg)
+    try:
+        conf, by, dcol, qcol, ucol, bcol, id_col, mod = _used_cols(db, table)
+    except Exception as e:
+        st.error(f"Columns nahi mile: {e}")
+        return
+    if not (qcol and ucol and id_col):
+        st.error(f"{TABLES[table]} mein {conf['qty']} / {conf['used']} column nahi mile.")
+        return
+    ver = st.session_state.setdefault(k + "_ver", 0)
+    c1, c2, c3 = st.columns([2, 1, 1])
+    used_date = c1.date_input("Used Date", value=datetime.now(IST).date(), format="DD/MM/YYYY", key=f"{k}_d{ver}")
+    if paper:
+        unit = c2.selectbox("Unit", list(PAPER_UNITS), key=f"{k}_u{ver}")
+        qty = c3.number_input("Qty", min_value=0.0, value=None, step=1.0, key=f"{k}_q{ver}")
+        factor = PAPER_UNITS[unit]
+    else:
+        unit, factor = "Pkt", 1
+        c2.text_input("Unit", "Pkt", disabled=True, key=f"{k}_u{ver}")
+        qty = c3.number_input("Qty", min_value=0, value=None, step=1, key=f"{k}_q{ver}")
+    remark = st.text_input("Remark (optional)", key=f"{k}_r{ver}")
+    if paper:
+        st.caption("1 Carton = 10 Ream = 5,000 Sheet  ·  1 Ream = 500 Sheet")
+
+    try:
+        rows = db.select_all(table, {"select": "*"})
+    except Exception as e:
+        st.error(f"Entries nahi aa sakin: {e}")
+        return
+    need = int(round((qty or 0) * factor))
+    plan, left, avail = used_plan(rows, dcol, qcol, ucol, bcol, id_col, used_date, need)
+    base = conf["unit"]
+    ind = lambda n: _money(n).replace("₹ ", "")
+    nice = (lambda n: f"{ind(n)} Sheet ({ind(round(n / 5000, 2))} Carton)") if paper else (lambda n: f"{ind(n)} Pkt")
+    st.caption(f"{used_date:%d-%m-%Y} tak kul bacha Balance: **{nice(avail)}**")
+
+    if need > 0:
+        if left > 0:
+            st.error(f"❌ Balance kam hai: chahiye {nice(need)}, bacha sirf {nice(avail)}. "
+                     "Pehle naye maal (invoice) ki entry daalein ya Qty theek karein.")
+        else:
+            st.dataframe(pd.DataFrame([{
+                "Received Date": p["date"].strftime("%d-%m-%Y") if p["date"] != date.min else "",
+                **{c: p["row"].get(by.get(c)) for c in conf["show"]},
+                f"Balance (abhi)": p["bal"], "Ghatega": p["take"], "Balance (naya)": p["bal"] - p["take"],
+            } for p in plan]), use_container_width=True, hide_index=True)
+            qtxt = f"{qty:g} {unit}" + (f" ({ind(need)} {base})" if factor != 1 else "")
+            st.button(f"✅ Save: {used_date:%d-%m-%Y} ko {qtxt} used", type="primary", key=f"{k}_btn",
+                      on_click=lambda: st.session_state.__setitem__(k + "_go", True))
+            if st.session_state.pop(k + "_go", False):
+                detail = [{"id": p["row"][id_col], "q": p["take"]} for p in plan]
+                try:
+                    db.insert(USED_TABLE, {"Used_Date": used_date.isoformat(), "Item_Type": "Paper" if paper else "Toner",
+                                           "Qty": float(qty), "Unit": unit, "Qty_Base": need,
+                                           "Remark": remark.strip() or None, "Detail": json.dumps(detail)})
+                except Exception as e:
+                    st.error(f"❌ Save nahi hua: {e}  — Supabase mein **paper_toner_used_setup.sql** chalayein.")
+                    return
+                done = 0
+                for p in plan:
+                    row = {ucol: p["used"] + p["take"]}
+                    if bcol:
+                        row[bcol] = p["bal"] - p["take"]
+                    if mod:
+                        row[mod["column_name"]] = modify_value(mod)
+                    try:
+                        if db.update(table, id_col, p["row"][id_col], row, log_action=f"Used Entry ({used_date:%d-%m-%Y})"):
+                            done += 1
+                    except Exception:
+                        pass
+                st.session_state[k + "_msg"] = (
+                    f"✔ {used_date:%d-%m-%Y} ko {qtxt} used – {done} entry ka Balance ghat gaya."
+                    if done == len(plan) else f"❌ {len(plan) - done} entry update nahi hui – Log dekhein.")
+                st.session_state[k + "_ver"] = ver + 1
+                st.rerun()
+
+    used_history(db, table, paper, by, ucol, bcol, id_col, mod)
+
+
+def used_history(db, table, paper, by, ucol, bcol, id_col, mod):
+    """📜 Kab kitna paper / toner laga."""
+    try:
+        hist = db.select_all(USED_TABLE, {"select": "*", "Item_Type": f"eq.{'Paper' if paper else 'Toner'}",
+                                          "order": "Used_Date.desc,id.desc"})
+    except Exception as e:
+        if "Paper_Toner_Used" in str(e) or "PGRST205" in str(e) or "does not exist" in str(e):
+            st.warning("Setup baaki: Supabase SQL Editor mein **paper_toner_used_setup.sql** ek baar chalayein.")
+        else:
+            st.error(f"Used History nahi aayi: {e}")
+        return
+    if not hist:
+        return
+    h = pd.DataFrame(hist)
+    h["_d"] = pd.to_datetime(h["Used_Date"], errors="coerce")
+    h["_m"] = h["_d"].dt.strftime("%m-%Y")
+    base = "Sheet" if paper else "Pkt"
+    ind = lambda n: _money(n).replace("₹ ", "")
+    st.markdown("**📜 Used History**")
+    month = h.groupby("_m", sort=False)["Qty_Base"].sum()
+    cards = [(f"{m}", (f"{ind(int(v))} Sheet · {ind(round(v / 5000, 2))} Ctn" if paper else f"{ind(int(v))} Pkt")) for m, v in month.head(6).items()]
+    st.markdown(_card_row(cards, small=True), unsafe_allow_html=True)
+    show = pd.DataFrame({"Used Date": h["_d"].dt.strftime("%d-%m-%Y"), "Qty": h["Qty"].map(lambda v: f"{float(v):g}"),
+                         "Unit": h.get("Unit"), f"Total {base}": h["Qty_Base"].map(lambda v: ind(int(v))),
+                         "Remark": h.get("Remark"), "Kisne": h.get("Created_By")})
+    st.dataframe(show, use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Download CSV", show.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"{'Paper' if paper else 'Toner'}_Used_History.csv", mime="text/csv",
+                       key=f"{table}_used_csv")
+    if not is_admin():
+        return
+    with st.expander("↩️ Galat Used Entry hatayein (Balance wapas)"):
+        opts = {int(r["id"]): f"{pd.to_datetime(r['Used_Date']):%d-%m-%Y} – {float(r['Qty']):g} {r.get('Unit') or ''}"
+                + (f" ({r['Remark']})" if r.get("Remark") else "") for r in hist}
+        pick = st.selectbox("Entry chunein", list(opts), format_func=opts.get, index=None, key=f"{table}_undo_pick")
+        k = f"{table}_undo_go"
+        st.button("↩️ Hatayein", key=f"{table}_undo_btn", disabled=pick is None,
+                  on_click=lambda: st.session_state.__setitem__(k, True))
+        if pick is None or not st.session_state.pop(k, False):
+            return
+        rec = next(r for r in hist if int(r["id"]) == pick)
+        try:
+            detail = json.loads(rec.get("Detail") or "[]")
+        except ValueError:
+            detail = []
+        for d in detail:
+            got = db.select(table, {"select": "*", id_col: f"eq.{d['id']}"})
+            if not got:
+                continue
+            r = got[0]
+            used = int(round(_num0(r.get(ucol)) or 0))
+            back = min(int(d["q"]), used)
+            row = {ucol: used - back}
+            if bcol:
+                row[bcol] = int(round(_num0(r.get(bcol)) or 0)) + back
+            if mod:
+                row[mod["column_name"]] = modify_value(mod)
+            db.update(table, id_col, d["id"], row, log_action="Used Entry Hatayi")
+        db.delete(USED_TABLE, "id", pick)
+        st.session_state[f"{table}_used_msg"] = f"✔ Used Entry hatayi – {opts[pick]} ka Balance wapas aa gaya."
+        st.rerun()
+
+
 def stock_sync(db, stock_date, paper_sheets: int, toner_pkt: int, which=("Paper_Table", "Toner")):
     """📦 Stock ki ginti se Paper / Toner table ka Consumption / Used bhar kar Balance milana."""
     naam = " / ".join({"Paper_Table": "Paper", "Toner": "Toner"}[w] for w in which)
@@ -3059,11 +3245,14 @@ def main():
                 st.error(f"Table '{table}' nahi mila. Naam check karein.")
                 continue
 
-            modes = ["➕ New Entry", "📋 Entries Show"] + (["📥 Excel Upload"] if is_admin() else [])
+            modes = (["➕ New Entry"] + (["➖ Used Entry"] if table in SYNC else []) + ["📋 Entries Show"]
+                     + (["📥 Excel Upload"] if is_admin() else []))
             mode = st.radio("Kya karna hai?", modes,
                             horizontal=True, key=f"{table}_mode", label_visibility="collapsed")
             if mode.startswith("➕"):
                 entry_form(db, table, cols)
+            elif mode.startswith("➖"):
+                used_entry(db, table)
             elif mode.startswith("📥"):
                 excel_upload(db, table, cols)
             else:
